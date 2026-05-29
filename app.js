@@ -1,5 +1,5 @@
 // ==================== CONFIG ====================
-const BASE_URL = "https://futballbackend-production-88a0.up.railway.app";
+const BASE_URL = "https://futballbackend-production-aefb.up.railway.app";
 
 let config = { baseUrl: BASE_URL, token: '' };
 
