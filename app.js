@@ -143,7 +143,8 @@ function navigate(page) {
     transactions:'Platform Transactions', binance:'Crypto Deposits',
     'upgrade-chats':'Admin Upgrade Chats', 'affiliate-withdrawals':'Affiliate Withdrawals',
     'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
-    'withdrawals':'Withdrawal Requests'
+    'withdrawals':'Withdrawal Requests',
+    'user-deposits':'User Deposit History'
   };
   document.getElementById('page-title').textContent = titles[page] || page;
   document.getElementById('alert-container').innerHTML = '';
@@ -156,7 +157,8 @@ function reloadPage() {
     transactions:renderTransactions, binance:renderBinance,
     'upgrade-chats':renderUpgradeChats, 'affiliate-withdrawals':renderAffiliateWithdrawals,
     'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
-    'withdrawals':renderWithdrawals
+    'withdrawals':renderWithdrawals,
+    'user-deposits':renderUserDeposits
   };
   (pages[currentPage] || renderDashboard)();
 }
@@ -434,6 +436,7 @@ async function viewUser(id) {
           ${detailRow('Total Transactions', d.wallet.totalTransactions)}
         </div>` : '<div class="alert alert-info" style="margin-top:12px">ℹ No wallet found for this user.</div>'}
       <div class="modal-footer">
+        <button class="btn-ghost btn-sm" onclick="viewUserDepositsModal('${id}', '${d.email||''}')">📥 Deposits</button>
         <button class="btn-ghost btn-sm" onclick="viewUserTx('${id}')">Transactions</button>
         <button class="btn-ghost btn-sm" onclick="viewUserWithdrawals('${id}', '${d.email||''}')">Withdrawals</button>
         <button class="btn-ghost" onclick="closeModal()">Close</button>
@@ -450,21 +453,16 @@ async function viewUserTx(userId) {
   showAlert('Note: to filter by user, get their Wallet ID from the user detail and paste it in the Wallet ID filter.', 'info', 7000);
 }
 
-// ── View a specific user's withdrawals ───────────────────────────────────────
-// Navigates to the Withdrawals page and loads that user's withdrawal history
-// inline via a dedicated modal so you don't lose your place in the Users list.
+// ── View a specific user's withdrawals (modal) ────────────────────────────────
 async function viewUserWithdrawals(userId, userEmail) {
   openModal(`Withdrawals — ${userEmail || userId}`, loading('Fetching withdrawal history…'));
   try {
-    // Fetch all withdrawals and filter client-side by userId since the
-    // endpoint doesn't support a userId query param directly.
     let allRows = [], p = 0, total = 1;
-    while (p < total && p < 10) {   // cap at 10 pages (500 rows) to avoid hammering
+    while (p < total && p < 10) {
       const d = await api(`/api/wallet/withdrawals/admin/all?page=${p}&size=50`);
       allRows = allRows.concat(d.content || []);
       total = d.totalPages || 1;
       p++;
-      // Stop early once we've scrolled past all records for this user
       if ((d.content || []).length === 0) break;
     }
 
@@ -506,6 +504,58 @@ async function viewUserWithdrawals(userId, userEmail) {
       <div class="alert alert-error">✕ ${e.message}</div>
       <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
   }
+}
+
+// ── View a specific user's deposits (modal, using new endpoint) ───────────────
+async function viewUserDepositsModal(userId, userEmail) {
+  openModal(`Deposits — ${userEmail || userId}`, loading('Fetching deposit history…'));
+  try {
+    const data = await api(`/api/super-admin/users/${userId}/deposits?page=0&size=50`);
+    const list = data.content || [];
+
+    if (!list.length) {
+      document.getElementById('modal-content').innerHTML = `
+        ${empty('No deposits found for this user.')}
+        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+      return;
+    }
+
+    const totalDeposited = list.reduce((sum, d) => sum + Number(d.amount), 0);
+
+    const rows = list.map(d => `<tr>
+      ${labeledTd('Date',         `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+      ${labeledTd('Amount',       `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
+      ${labeledTd('Balance After',`₵${fmt(d.balanceAfter)}`)}
+      ${labeledTd('Status',       statusBadge(d.status))}
+      ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncate(d.providerRef,22)}</span>`)}
+    </tr>`).join('');
+
+    document.getElementById('modal-content').innerHTML = `
+      <div class="alert alert-info" style="margin-bottom:14px">
+        ℹ <strong>${list.length}</strong> deposit${list.length!==1?'s':''} shown
+        ${data.totalElements > list.length ? `(${data.totalElements.toLocaleString()} total — open full page for all)` : ''}.
+        Total shown: <strong style="color:var(--green-text)">₵${fmt(totalDeposited)}</strong>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Date</th><th>Amount</th><th>Balance After</th><th>Status</th><th>Provider Ref</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="modal-footer">
+        <button class="btn-ghost btn-sm" onclick="closeModal();navigateToUserDeposits('${userId}','${userEmail}')">Open Full Deposit Page</button>
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      </div>`;
+  } catch (e) {
+    document.getElementById('modal-content').innerHTML = `
+      <div class="alert alert-error">✕ ${e.message}</div>
+      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+// Helper: navigate to user deposits page pre-filtered to a specific user
+function navigateToUserDeposits(userId, userEmail) {
+  udFilterUserId    = userId;
+  udFilterUserEmail = userEmail;
+  navigate('user-deposits');
 }
 
 // ============================================================
@@ -1477,6 +1527,133 @@ async function exportWithdrawalsCSV() {
         w.reviewedAt??'', w.settledAt??'', w.createdAt
       ]));
     showAlert(`Exported ${rows.length} withdrawal rows!`, 'success');
+  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
+  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+}
+
+// ============================================================
+// 11. USER DEPOSIT HISTORY  ← NEW SECTION
+// ============================================================
+// State: filter by a specific userId (pre-filled when navigating from a user record)
+let udPage = 0, udFilterUserId = '', udFilterUserEmail = '';
+
+async function renderUserDeposits(page = 0) {
+  udPage = page;
+  const c = document.getElementById('page-content');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h2>User Deposit History</h2>
+        <button class="btn-ghost btn-sm" onclick="exportUserDepositsCSV()">⬇ Export CSV</button>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-info" style="margin-bottom:16px">
+          ℹ Enter a User ID to load their full deposit history, paginated from the server.
+          Calls <code>GET /api/super-admin/users/{userId}/deposits</code>.
+        </div>
+        <div class="form-row" style="margin-bottom:16px">
+          <div class="form-group" style="flex:1;min-width:260px">
+            <label>User ID (UUID) *</label>
+            <input id="ud-userid" type="text" placeholder="e.g. c9d0e1f2-…"
+              value="${udFilterUserId}"
+              oninput="udFilterUserId=this.value"
+              onkeydown="if(event.key==='Enter')renderUserDeposits(0)">
+          </div>
+          <div class="form-group" style="flex:1;min-width:180px">
+            <label>User Email (display only)</label>
+            <input id="ud-email" type="text" placeholder="For reference…"
+              value="${udFilterUserEmail}"
+              oninput="udFilterUserEmail=this.value">
+          </div>
+          <div style="display:flex;gap:6px;align-self:flex-end">
+            <button class="btn-primary" onclick="udFilterUserId=document.getElementById('ud-userid').value.trim();udFilterUserEmail=document.getElementById('ud-email').value.trim();renderUserDeposits(0)">Load Deposits</button>
+            <button class="btn-ghost"   onclick="udFilterUserId='';udFilterUserEmail='';renderUserDeposits(0)">Clear</button>
+          </div>
+        </div>
+        <div id="ud-list">${udFilterUserId ? loading('Fetching deposits…') : '<div class="empty"><div class="empty-icon">📥</div>Enter a User ID above and click Load Deposits.</div>'}</div>
+      </div>
+    </div>`;
+
+  if (!udFilterUserId) return;   // nothing to fetch yet
+
+  try {
+    const data = await api(`/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${udPage}&size=25`);
+    const list = data.content || [];
+
+    if (!list.length && udPage === 0) {
+      document.getElementById('ud-list').innerHTML = empty('No deposits found for this user.');
+      return;
+    }
+
+    // Pull identity from first row (all rows share the same user)
+    const firstName = list[0]?.firstName || '';
+    const lastName  = list[0]?.lastName  || '';
+    const email     = list[0]?.userEmail || udFilterUserEmail || '—';
+    const userId    = list[0]?.userId    || udFilterUserId;
+
+    // Running total across THIS page (server computes per-page; we show it with a note)
+    const pageTotal = list.reduce((s, d) => s + Number(d.amount), 0);
+
+    document.getElementById('ud-list').innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+        <div style="background:var(--surface-alt,#1e2433);border-radius:8px;padding:10px 16px;display:flex;gap:24px;flex-wrap:wrap">
+          <span><span style="color:var(--text-dim);font-size:12px">User</span><br>
+            <strong>${firstName} ${lastName}</strong>
+            <span style="color:var(--text-dim);font-size:12px;margin-left:6px">${email}</span></span>
+          <span><span style="color:var(--text-dim);font-size:12px">Total Records</span><br>
+            <strong>${data.totalElements.toLocaleString()}</strong></span>
+          <span><span style="color:var(--text-dim);font-size:12px">Page Total</span><br>
+            <strong style="color:var(--green-text)">₵${fmt(pageTotal)}</strong></span>
+        </div>
+        <button class="btn-ghost btn-sm" onclick="viewUser('${userId}')">View Full Profile</button>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>#</th><th>Date</th><th>Amount</th><th>Balance After</th>
+          <th>Status</th><th>Provider Ref</th><th>Tx ID</th>
+        </tr></thead>
+        <tbody>${list.map((d, i) => `<tr>
+          ${labeledTd('#',             String(udPage * 25 + i + 1))}
+          ${labeledTd('Date',          `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('Amount',        `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
+          ${labeledTd('Balance After', `₵${fmt(d.balanceAfter)}`)}
+          ${labeledTd('Status',        statusBadge(d.status))}
+          ${labeledTd('Provider Ref',  `<span class="mono" style="font-size:11px">${truncate(d.providerRef, 24)}</span>`)}
+          ${labeledTd('Tx ID',         `<span class="mono" style="font-size:11px">${truncate(String(d.transactionId||'—'), 20)}</span>`)}
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
+        <span class="pager-info">${data.totalElements.toLocaleString()} total deposits</span>
+        ${paginator(udPage, data.totalPages, 'renderUserDeposits')}
+      </div>`;
+  } catch (e) {
+    document.getElementById('ud-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+async function exportUserDepositsCSV() {
+  if (!udFilterUserId) { showAlert('Enter a User ID first.', 'error'); return; }
+  const btn = document.querySelector('[onclick="exportUserDepositsCSV()"]');
+  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  try {
+    let rows=[], p=0, total=1;
+    while (p < total) {
+      const d = await api(`/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${p}&size=100`);
+      rows = rows.concat(d.content||[]);
+      total = d.totalPages||1;
+      p++;
+    }
+    if (!rows.length) { showAlert('No data to export.','error'); return; }
+    const headers=['Tx ID','Wallet ID','User ID','User Email','First Name','Last Name',
+                   'Amount (GHS)','Balance After','Provider Ref','Status','Created At'];
+    const safeEmail = (rows[0]?.userEmail || udFilterUserId).replace(/[^a-z0-9]/gi,'_');
+    exportCSV(`deposits-${safeEmail}-${new Date().toISOString().slice(0,10)}.csv`, headers,
+      rows.map(d=>[
+        d.transactionId, d.walletId, d.userId, d.userEmail,
+        d.firstName, d.lastName, d.amount, d.balanceAfter,
+        d.providerRef||'', d.status, d.createdAt
+      ]));
+    showAlert(`Exported ${rows.length} deposit rows!`, 'success');
   } catch(e) { showAlert('Export failed: '+e.message,'error'); }
   finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
 }
