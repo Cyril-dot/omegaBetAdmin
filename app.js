@@ -1,6 +1,5 @@
 // ==================== CONFIG ====================
-const BASE_URL = "https://futballbackend-production-b0ef.up.railway.app";
-
+const BASE_URL = 'https://futballbackend-production-b0ef.up.railway.app';
 let config = { baseUrl: BASE_URL, token: '' };
 
 // ==================== SIDEBAR ====================
@@ -72,6 +71,14 @@ function fmtDate(d)  { return d ? new Date(d).toLocaleString('en-GB', { day:'2-d
 function truncate(s, n=28) { return s && s.length > n ? s.slice(0,n)+'…' : (s||'—'); }
 function coalesce(...args) { for (const a of args) if (a !== null && a !== undefined && a !== '') return a; return '—'; }
 
+// ── Deposit type helpers ──────────────────────────────────────────────────────
+// Amounts below 30,000 are MoMo deposits (GHS ₵).
+// Amounts 30,000+ are NGN bank transfers (₦).
+function isMomo(amount)          { return Number(amount) < 30000; }
+function depositSymbol(amount)   { return isMomo(amount) ? '₵' : '₦'; }
+function depositLabel(amount)    { return isMomo(amount) ? 'MoMo' : 'Bank Transfer'; }
+function depositCurrency(amount) { return isMomo(amount) ? 'GHS' : 'NGN'; }
+
 function statusBadge(s) {
   const map = {
     COMPLETED:'badge-green', APPROVED:'badge-green', PROCESSED:'badge-green',
@@ -141,7 +148,7 @@ function navigate(page) {
   const titles = {
     dashboard:'Dashboard', admins:'Admin Accounts', users:'All Users',
     transactions:'Platform Transactions', binance:'Crypto Deposits',
-    'bank-deposits':'Bank Transfer Deposits',                          // ← NEW
+    'bank-deposits':'Bank Transfer & MoMo Deposits',
     'upgrade-chats':'Admin Upgrade Chats', 'affiliate-withdrawals':'Affiliate Withdrawals',
     'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
     'withdrawals':'Withdrawal Requests',
@@ -156,7 +163,7 @@ function reloadPage() {
   const pages = {
     dashboard:renderDashboard, admins:renderAdmins, users:renderUsers,
     transactions:renderTransactions, binance:renderBinance,
-    'bank-deposits':renderBankDeposits,                                // ← NEW
+    'bank-deposits':renderBankDeposits,
     'upgrade-chats':renderUpgradeChats, 'affiliate-withdrawals':renderAffiliateWithdrawals,
     'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
     'withdrawals':renderWithdrawals,
@@ -886,8 +893,14 @@ async function exportBinanceCSV() {
 }
 
 // ============================================================
-// 6. BANK TRANSFER DEPOSITS  ← NEW SECTION
+// 6. BANK TRANSFER & MOMO DEPOSITS
 // ============================================================
+// Tab options:
+//   'all'     – all bank/momo deposits, newest first
+//   'momo'    – only deposits with ngnAmountSent < 30000 (MoMo / GHS ₵)
+//   'bank'    – only deposits with ngnAmountSent >= 30000 (NGN bank transfer ₦)
+//   'pending' – all PENDING deposits, newest first
+// ─────────────────────────────────────────────────────────────
 let bankDepositPage = 0, bankDepositTab = 'all';
 
 async function renderBankDeposits(page = 0) {
@@ -896,17 +909,22 @@ async function renderBankDeposits(page = 0) {
   c.innerHTML = `
     <div class="card">
       <div class="card-header">
-        <h2>Bank Transfer Deposits</h2>
+        <h2>Bank Transfer &amp; MoMo Deposits</h2>
         <button class="btn-ghost btn-sm" onclick="exportBankDepositsCSV()">⬇ Export CSV</button>
       </div>
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:14px">
-          ℹ Users submit proof of their NGN bank transfer. Review the screenshot and
-          transfer reference, then approve (credits wallet) or reject.
+          ℹ <strong>MoMo deposits</strong> (amount &lt; ₵30,000) are shown in cedis (₵).
+          <strong>Bank transfers</strong> (amount ≥ 30,000) are shown in naira (₦).
+          All lists are sorted newest first.
         </div>
         <div class="tabs">
           <button class="tab ${bankDepositTab==='all'?'active':''}"
             onclick="bankDepositTab='all';renderBankDeposits(0)">All Deposits</button>
+          <button class="tab ${bankDepositTab==='momo'?'active':''}"
+            onclick="bankDepositTab='momo';renderBankDeposits(0)">📱 MoMo (₵)</button>
+          <button class="tab ${bankDepositTab==='bank'?'active':''}"
+            onclick="bankDepositTab='bank';renderBankDeposits(0)">🏦 Bank Transfer (₦)</button>
           <button class="tab ${bankDepositTab==='pending'?'active':''}"
             onclick="bankDepositTab='pending';renderBankDeposits(0)">⏳ Pending Review</button>
         </div>
@@ -915,61 +933,97 @@ async function renderBankDeposits(page = 0) {
     </div>`;
 
   try {
-    const ep = bankDepositTab === 'pending'
-      ? `/api/admin/bank-deposits/pending?page=${page}&size=20`
-      : `/api/admin/bank-deposits?page=${page}&size=20`;
+    // Determine API endpoint — pending tab has its own route
+    const isPendingTab = bankDepositTab === 'pending';
+    const ep = isPendingTab
+      ? `/api/admin/bank-deposits/pending?page=${page}&size=50&sort=createdAt,desc`
+      : `/api/admin/bank-deposits?page=${page}&size=50&sort=createdAt,desc`;
+
     const data = await api(ep);
-    const list = data.content || [];
+
+    // Sort newest first client-side (safety net in case API ignores sort param)
+    let list = (data.content || []).sort((a, b) =>
+      new Date(b.createdAt) - new Date(a.createdAt)
+    );
+
+    // Client-side filter for momo / bank tabs
+    if (bankDepositTab === 'momo') {
+      list = list.filter(d => isMomo(d.ngnAmountSent));
+    } else if (bankDepositTab === 'bank') {
+      list = list.filter(d => !isMomo(d.ngnAmountSent));
+    }
+
+    // Tab-specific empty messages
+    const emptyMsgs = {
+      all:     'No deposit submissions found.',
+      momo:    'No MoMo deposit submissions found.',
+      bank:    'No bank transfer deposit submissions found.',
+      pending: 'No pending deposit submissions found.'
+    };
 
     document.getElementById('bank-deposit-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Date</th><th>User ID</th><th>Transfer Ref</th>
-          <th>Sent (NGN)</th><th>Expected Credit</th><th>Credited</th>
+          <th>Date</th><th>Type</th><th>User ID</th><th>Transfer Ref</th>
+          <th>Sent</th><th>Expected Credit</th><th>Credited</th>
           <th>Sender Name</th><th>Status</th><th>Actions</th>
         </tr></thead>
-        <tbody>${list.map(d => `<tr>
-          ${labeledTd('Date',            `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('User ID',         `<span class="mono">${truncate(d.userId, 14)}</span>`)}
-          ${labeledTd('Transfer Ref',    `<span class="mono" style="font-size:12px">${truncate(d.transferReference, 20)}</span>`)}
-          ${labeledTd('Sent (NGN)',      `<strong>₦${fmt(d.ngnAmountSent)}</strong>`)}
-          ${labeledTd('Expected Credit', `₦${fmt(d.expectedNgnCredit)}`)}
-          ${labeledTd('Credited',        d.creditedNgnAmount != null ? `<strong style="color:var(--green-text)">₦${fmt(d.creditedNgnAmount)}</strong>` : '—')}
-          ${labeledTd('Sender Name',     d.senderAccountName || '—')}
-          ${labeledTd('Status',          statusBadge(d.status))}
-          ${labeledTd('Actions', `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick="viewBankDeposit('${d.id}')">View</button>
-            ${d.status === 'PENDING' ? `
-              <button class="btn-success btn-sm" onclick="openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit})">Approve</button>
-              <button class="btn-danger btn-sm"  onclick="openRejectBankDeposit('${d.id}')">Reject</button>` : ''}
-          </div>`)}
-        </tr>`).join('')}</tbody>
+        <tbody>${list.map(d => {
+          const sym    = depositSymbol(d.ngnAmountSent);
+          const typeBadge = isMomo(d.ngnAmountSent)
+            ? `<span class="badge badge-green">📱 MoMo</span>`
+            : `<span class="badge badge-blue">🏦 Bank</span>`;
+          return `<tr>
+            ${labeledTd('Date',            `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+            ${labeledTd('Type',            typeBadge)}
+            ${labeledTd('User ID',         `<span class="mono">${truncate(d.userId, 14)}</span>`)}
+            ${labeledTd('Transfer Ref',    `<span class="mono" style="font-size:12px">${truncate(d.transferReference, 20)}</span>`)}
+            ${labeledTd('Sent',            `<strong>${sym}${fmt(d.ngnAmountSent)}</strong>`)}
+            ${labeledTd('Expected Credit', `${sym}${fmt(d.expectedNgnCredit)}`)}
+            ${labeledTd('Credited',        d.creditedNgnAmount != null
+              ? `<strong style="color:var(--green-text)">${sym}${fmt(d.creditedNgnAmount)}</strong>` : '—')}
+            ${labeledTd('Sender Name',     d.senderAccountName || '—')}
+            ${labeledTd('Status',          statusBadge(d.status))}
+            ${labeledTd('Actions', `<div class="btn-row">
+              <button class="btn-ghost btn-sm" onclick="viewBankDeposit('${d.id}')">View</button>
+              ${d.status === 'PENDING' ? `
+                <button class="btn-success btn-sm" onclick="openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit}, ${d.ngnAmountSent})">Approve</button>
+                <button class="btn-danger btn-sm"  onclick="openRejectBankDeposit('${d.id}')">Reject</button>` : ''}
+            </div>`)}
+          </tr>`;
+        }).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
         <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
         ${paginator(bankDepositPage, data.totalPages, 'renderBankDeposits')}
-      </div>` : empty('No bank deposit submissions found.');
+      </div>` : empty(emptyMsgs[bankDepositTab] || 'No records found.');
   } catch (e) {
     document.getElementById('bank-deposit-list').innerHTML =
       `<div class="alert alert-error">✕ ${e.message}</div>`;
   }
 }
 
-// ── View full detail for one bank deposit ─────────────────────────────────────
+// ── View full detail for one bank/momo deposit ────────────────────────────────
 async function viewBankDeposit(id) {
-  openModal('Bank Deposit Detail', loading());
+  openModal('Deposit Detail', loading());
   try {
-    const d = await api(`/api/admin/bank-deposits/${id}`);
+    const d   = await api(`/api/admin/bank-deposits/${id}`);
+    const sym = depositSymbol(d.ngnAmountSent);
+    const typeBadge = isMomo(d.ngnAmountSent)
+      ? `<span class="badge badge-green">📱 MoMo Deposit (₵ GHS)</span>`
+      : `<span class="badge badge-blue">🏦 Bank Transfer (₦ NGN)</span>`;
+
     document.getElementById('modal-content').innerHTML = `
       <div class="section-title">Deposit Info</div>
       <div class="detail-grid">
         ${detailRow('ID',                    `<span class="mono">${d.id}</span>`)}
+        ${detailRow('Type',                  typeBadge)}
         ${detailRow('Status',                statusBadge(d.status))}
         ${detailRow('Transfer Reference',    `<span class="mono">${d.transferReference || '—'}</span>`)}
-        ${detailRow('NGN Amount Sent',       `₦${fmt(d.ngnAmountSent)}`)}
-        ${detailRow('Expected NGN Credit',   `₦${fmt(d.expectedNgnCredit)}`)}
-        ${detailRow('Credited NGN Amount',   d.creditedNgnAmount != null
-            ? `<strong style="color:var(--green-text)">₦${fmt(d.creditedNgnAmount)}</strong>`
+        ${detailRow('Amount Sent',           `${sym}${fmt(d.ngnAmountSent)}`)}
+        ${detailRow('Expected Credit',       `${sym}${fmt(d.expectedNgnCredit)}`)}
+        ${detailRow('Credited Amount',       d.creditedNgnAmount != null
+            ? `<strong style="color:var(--green-text)">${sym}${fmt(d.creditedNgnAmount)}</strong>`
             : '—')}
         ${detailRow('Sender Account Name',   d.senderAccountName || '—')}
         ${detailRow('User Note',             d.userNote || '—')}
@@ -1003,7 +1057,7 @@ async function viewBankDeposit(id) {
       <div class="modal-footer">
         ${d.status === 'PENDING' ? `
           <button class="btn-success"
-            onclick="closeModal();openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit})">
+            onclick="closeModal();openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit}, ${d.ngnAmountSent})">
             ✓ Approve
           </button>
           <button class="btn-danger"
@@ -1019,37 +1073,44 @@ async function viewBankDeposit(id) {
 }
 
 // ── Approve modal ─────────────────────────────────────────────────────────────
-function openApproveBankDeposit(id, expectedNgn) {
-  openModal('Approve Bank Deposit', `
+function openApproveBankDeposit(id, expectedNgn, ngnAmountSent) {
+  const sym      = depositSymbol(ngnAmountSent != null ? ngnAmountSent : expectedNgn);
+  const isMomoTx = isMomo(ngnAmountSent != null ? ngnAmountSent : expectedNgn);
+  openModal(`Approve ${isMomoTx ? 'MoMo' : 'Bank Transfer'} Deposit`, `
     <div class="alert alert-info" style="margin-bottom:14px">
-      ℹ The user's NGN wallet will be credited immediately on approval.
-      Verify the transfer reference and screenshot before proceeding.
+      ℹ The user's wallet will be credited immediately on approval.
+      ${isMomoTx
+        ? 'Verify the MoMo transaction reference and screenshot before proceeding.'
+        : 'Verify the bank transfer reference and screenshot before proceeding.'}
     </div>
     <div class="form-group" style="margin-bottom:12px">
-      <label>NGN Amount to Credit * <span style="color:var(--text-dim);font-size:12px">
+      <label>Amount to Credit * <span style="color:var(--text-dim);font-size:12px">
         (adjust if actual received differs from expected)</span></label>
-      <input id="bd-appr-amt" type="number" step="0.01" min="0.01" value="${expectedNgn}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px;font-weight:600">${sym}</span>
+        <input id="bd-appr-amt" type="number" step="0.01" min="0.01" value="${expectedNgn}" style="flex:1">
+      </div>
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Admin Note (optional)</label>
       <textarea id="bd-appr-note"
-        placeholder="Transfer confirmed via bank statement. Ref matches."></textarea>
+        placeholder="${isMomoTx ? 'MoMo transaction confirmed. Ref matches.' : 'Transfer confirmed via bank statement. Ref matches.'}"></textarea>
     </div>
     <div id="bd-appr-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn-success" id="bd-appr-btn"
-        onclick="approveBankDeposit('${id}')">✓ Confirm Approve</button>
+        onclick="approveBankDeposit('${id}', '${sym}')">✓ Confirm Approve</button>
     </div>`);
 }
 
-async function approveBankDeposit(id) {
+async function approveBankDeposit(id, sym) {
   const creditedNgnAmount = parseFloat(document.getElementById('bd-appr-amt').value);
   const adminNote         = document.getElementById('bd-appr-note').value.trim();
 
   if (!creditedNgnAmount || creditedNgnAmount <= 0) {
     document.getElementById('bd-appr-msg').innerHTML =
-      '<div class="alert alert-error">✕ Enter a valid NGN amount to credit.</div>';
+      '<div class="alert alert-error">✕ Enter a valid amount to credit.</div>';
     return;
   }
 
@@ -1062,7 +1123,7 @@ async function approveBankDeposit(id) {
     });
     closeModal();
     showAlert(
-      `Bank deposit approved! ₦${fmt(creditedNgnAmount)} credited to user wallet.`,
+      `Deposit approved! ${sym}${fmt(creditedNgnAmount)} credited to user wallet.`,
       'success'
     );
     renderBankDeposits(bankDepositPage);
@@ -1075,15 +1136,15 @@ async function approveBankDeposit(id) {
 
 // ── Reject modal ──────────────────────────────────────────────────────────────
 function openRejectBankDeposit(id) {
-  openModal('Reject Bank Deposit', `
+  openModal('Reject Deposit', `
     <div class="alert alert-warning" style="margin-bottom:14px">
       ⚠ The user's wallet will <strong>NOT</strong> be credited.
-      Your note will be stored on the record. The user was never debited.
+      Your note will be stored on the record.
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Rejection Reason * (max 1000 chars)</label>
       <textarea id="bd-rej-note" maxlength="1000"
-        placeholder="Transfer reference not found on our bank statement after 48h. Please re-submit with correct reference."></textarea>
+        placeholder="Transaction reference not found. Please re-submit with correct reference."></textarea>
     </div>
     <div id="bd-rej-msg"></div>
     <div class="modal-footer">
@@ -1106,7 +1167,7 @@ async function rejectBankDeposit(id) {
   try {
     await api(`/api/admin/bank-deposits/${id}/reject`, 'POST', { adminNote });
     closeModal();
-    showAlert('Bank deposit rejected.', 'success');
+    showAlert('Deposit rejected.', 'success');
     renderBankDeposits(bankDepositPage);
   } catch (e) {
     document.getElementById('bd-rej-msg').innerHTML =
@@ -1117,15 +1178,15 @@ async function rejectBankDeposit(id) {
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 async function exportBankDepositsCSV() {
-  if (!bankDepositTab) return;
   const btn = document.querySelector('[onclick="exportBankDepositsCSV()"]');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
     let rows = [], p = 0, total = 1;
     while (p < total) {
-      const ep = bankDepositTab === 'pending'
-        ? `/api/admin/bank-deposits/pending?page=${p}&size=100`
-        : `/api/admin/bank-deposits?page=${p}&size=100`;
+      const isPendingTab = bankDepositTab === 'pending';
+      const ep = isPendingTab
+        ? `/api/admin/bank-deposits/pending?page=${p}&size=100&sort=createdAt,desc`
+        : `/api/admin/bank-deposits?page=${p}&size=100&sort=createdAt,desc`;
       const d = await api(ep);
       rows = rows.concat(d.content || []);
       total = d.totalPages || 1;
@@ -1133,19 +1194,34 @@ async function exportBankDepositsCSV() {
     }
     if (!rows.length) { showAlert('No data to export.', 'error'); return; }
 
+    // Sort newest first
+    rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    // Apply same client-side filter as the current tab
+    if (bankDepositTab === 'momo') {
+      rows = rows.filter(d => isMomo(d.ngnAmountSent));
+    } else if (bankDepositTab === 'bank') {
+      rows = rows.filter(d => !isMomo(d.ngnAmountSent));
+    }
+
     const headers = [
-      'ID', 'User ID', 'Transfer Reference', 'NGN Amount Sent',
-      'Expected NGN Credit', 'Credited NGN Amount', 'Sender Account Name',
+      'ID', 'Type', 'User ID', 'Transfer Reference', 'Amount Sent',
+      'Currency', 'Expected Credit', 'Credited Amount', 'Sender Account Name',
       'Status', 'User Note', 'Admin Note',
       'Reviewed By', 'Reviewed At', 'Wallet Tx ID',
       'Created At', 'Updated At'
     ];
     exportCSV(
-      `bank-deposits-${new Date().toISOString().slice(0, 10)}.csv`,
+      `bank-momo-deposits-${bankDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
       headers,
       rows.map(d => [
-        d.id, d.userId, d.transferReference,
-        d.ngnAmountSent, d.expectedNgnCredit,
+        d.id,
+        isMomo(d.ngnAmountSent) ? 'MoMo' : 'Bank Transfer',
+        d.userId,
+        d.transferReference,
+        d.ngnAmountSent,
+        depositCurrency(d.ngnAmountSent),
+        d.expectedNgnCredit,
         d.creditedNgnAmount ?? '',
         d.senderAccountName ?? '',
         d.status,
@@ -1158,7 +1234,7 @@ async function exportBankDepositsCSV() {
         d.updatedAt   ?? ''
       ])
     );
-    showAlert(`Exported ${rows.length} bank deposit rows!`, 'success');
+    showAlert(`Exported ${rows.length} deposit rows!`, 'success');
   } catch (e) {
     showAlert('Export failed: ' + e.message, 'error');
   } finally {
