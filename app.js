@@ -1,5 +1,5 @@
 // ==================== CONFIG ====================
-const BASE_URL = 'https://futballbackend-production-b0ef.up.railway.app';
+const BASE_URL = 'https://futballbackend-production-f14d.up.railway.app';
 let config = { baseUrl: BASE_URL, token: '' };
 
 // ==================== SIDEBAR ====================
