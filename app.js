@@ -100,6 +100,14 @@ function kindBadge(k) {
   };
   return `<span class="badge ${map[k]||'badge-gray'}">${k||'—'}</span>`;
 }
+function networkBadge(n) {
+  const map = { MTN:'badge-yellow', TELECEL:'badge-blue', AIRTELTIGO:'badge-red' };
+  return `<span class="badge ${map[n]||'badge-gray'}">${n||'—'}</span>`;
+}
+function purposeBadge(p) {
+  const map = { WALLET_FUNDING:'badge-green', CASINO_PLAY:'badge-purple', OTHER:'badge-gray' };
+  return `<span class="badge ${map[p]||'badge-gray'}">${p||'—'}</span>`;
+}
 
 function loading(msg='Loading…') {
   return `<div class="loading-row"><span class="spinner"></span>${msg}</div>`;
@@ -152,7 +160,8 @@ function navigate(page) {
     'upgrade-chats':'Admin Upgrade Chats', 'affiliate-withdrawals':'Affiliate Withdrawals',
     'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
     'withdrawals':'Withdrawal Requests',
-    'user-deposits':'User Deposit History'
+    'user-deposits':'User Deposit History',
+    'simple-deposits':'Simple Deposits (MoMo)'
   };
   document.getElementById('page-title').textContent = titles[page] || page;
   document.getElementById('alert-container').innerHTML = '';
@@ -167,7 +176,8 @@ function reloadPage() {
     'upgrade-chats':renderUpgradeChats, 'affiliate-withdrawals':renderAffiliateWithdrawals,
     'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
     'withdrawals':renderWithdrawals,
-    'user-deposits':renderUserDeposits
+    'user-deposits':renderUserDeposits,
+    'simple-deposits':renderSimpleDeposits
   };
   (pages[currentPage] || renderDashboard)();
 }
@@ -2008,6 +2018,243 @@ async function exportUserDepositsCSV() {
     showAlert(`Exported ${rows.length} deposit rows!`, 'success');
   } catch(e) { showAlert('Export failed: '+e.message,'error'); }
   finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+}
+
+// ============================================================
+// 13. SIMPLE DEPOSITS (MoMo — phone/account submission flow)
+// ============================================================
+// Backed by SimpleDepositController / SimpleDepositService:
+//   GET  /api/admin/simple-deposits            — all, paginated
+//   GET  /api/admin/simple-deposits/pending     — pending queue
+//   GET  /api/admin/simple-deposits/{id}        — single detail
+//   POST /api/admin/simple-deposits/{id}/approve  { creditedAmount, adminNote }
+//   POST /api/admin/simple-deposits/{id}/reject   { adminNote }
+// ─────────────────────────────────────────────────────────────
+let simpleDepositPage = 0, simpleDepositTab = 'pending';
+
+async function renderSimpleDeposits(page = 0) {
+  simpleDepositPage = page;
+  const c = document.getElementById('page-content');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h2>Simple Deposits (MoMo)</h2>
+        <button class="btn-ghost btn-sm" onclick="exportSimpleDepositsCSV()">⬇ Export CSV</button>
+      </div>
+      <div class="card-body">
+        <div class="alert alert-info" style="margin-bottom:14px">
+          ℹ Users submit amount, phone number, account name and network directly (no screenshot).
+          Approving credits the wallet immediately and attributes referral commission.
+        </div>
+        <div class="tabs">
+          <button class="tab ${simpleDepositTab==='pending'?'active':''}"
+            onclick="simpleDepositTab='pending';renderSimpleDeposits(0)">⏳ Pending Review</button>
+          <button class="tab ${simpleDepositTab==='all'?'active':''}"
+            onclick="simpleDepositTab='all';renderSimpleDeposits(0)">All Deposits</button>
+        </div>
+        <div id="simple-deposit-list">${loading()}</div>
+      </div>
+    </div>`;
+
+  try {
+    const isPendingTab = simpleDepositTab === 'pending';
+    const ep = isPendingTab
+      ? `/api/admin/simple-deposits/pending?page=${page}&size=20`
+      : `/api/admin/simple-deposits?page=${page}&size=20`;
+
+    const data = await api(ep);
+    const list = data.content || [];
+
+    document.getElementById('simple-deposit-list').innerHTML = list.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Date</th><th>Phone</th><th>Account Name</th><th>Network</th>
+          <th>Purpose</th><th>Amount Claimed</th><th>Credited</th><th>Status</th><th>Actions</th>
+        </tr></thead>
+        <tbody>${list.map(d => `<tr>
+          ${labeledTd('Date',            `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('Phone',           `<span class="mono">${d.phoneNumber||'—'}</span>`)}
+          ${labeledTd('Account Name',    d.accountName||'—')}
+          ${labeledTd('Network',         networkBadge(d.network))}
+          ${labeledTd('Purpose',         purposeBadge(d.purpose))}
+          ${labeledTd('Amount Claimed',  `<strong>₵${fmt(d.amount)}</strong>`)}
+          ${labeledTd('Credited',        d.creditedAmount != null
+            ? `<strong style="color:var(--green-text)">₵${fmt(d.creditedAmount)}</strong>` : '—')}
+          ${labeledTd('Status',          statusBadge(d.status))}
+          ${labeledTd('Actions', `<div class="btn-row">
+            <button class="btn-ghost btn-sm" onclick="viewSimpleDeposit('${d.id}')">View</button>
+            ${d.status === 'PENDING' ? `
+              <button class="btn-success btn-sm" onclick="openApproveSimpleDeposit('${d.id}', ${d.amount})">Approve</button>
+              <button class="btn-danger btn-sm"  onclick="openRejectSimpleDeposit('${d.id}')">Reject</button>` : ''}
+          </div>`)}
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
+        <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
+        ${paginator(simpleDepositPage, data.totalPages, 'renderSimpleDeposits')}
+      </div>` : empty(isPendingTab ? 'No pending simple deposits found.' : 'No simple deposits found.');
+  } catch (e) {
+    document.getElementById('simple-deposit-list').innerHTML =
+      `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+async function viewSimpleDeposit(id) {
+  openModal('Simple Deposit Detail', loading());
+  try {
+    const d = await api(`/api/admin/simple-deposits/${id}`);
+    document.getElementById('modal-content').innerHTML = `
+      <div class="section-title">Deposit Info</div>
+      <div class="detail-grid">
+        ${detailRow('ID',                  `<span class="mono">${d.id}</span>`)}
+        ${detailRow('Status',              statusBadge(d.status))}
+        ${detailRow('Network',             networkBadge(d.network))}
+        ${detailRow('Purpose',             purposeBadge(d.purpose))}
+        ${detailRow('Phone Number',        `<span class="mono">${d.phoneNumber||'—'}</span>`)}
+        ${detailRow('Account Name',        d.accountName||'—')}
+        ${detailRow('Amount Claimed',      `₵${fmt(d.amount)}`)}
+        ${detailRow('Credited Amount',     d.creditedAmount != null
+            ? `<strong style="color:var(--green-text)">₵${fmt(d.creditedAmount)}</strong>` : '—')}
+        ${detailRow('Admin Note',          d.adminNote || '—')}
+        ${detailRow('Reviewed By',         d.reviewedBy ? `<span class="mono">${d.reviewedBy}</span>` : '—')}
+        ${detailRow('Reviewed At',         fmtDate(d.reviewedAt))}
+        ${detailRow('Created',             fmtDate(d.createdAt))}
+      </div>
+      <div class="modal-footer">
+        ${d.status === 'PENDING' ? `
+          <button class="btn-success"
+            onclick="closeModal();openApproveSimpleDeposit('${d.id}', ${d.amount})">✓ Approve</button>
+          <button class="btn-danger"
+            onclick="closeModal();openRejectSimpleDeposit('${d.id}')">✕ Reject</button>` : ''}
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      </div>`;
+  } catch (e) {
+    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+function openApproveSimpleDeposit(id, claimedAmount) {
+  openModal('Approve Simple Deposit', `
+    <div class="alert alert-info" style="margin-bottom:14px">
+      ℹ The user's wallet will be credited immediately on approval, and referral
+      commission will be attributed if this user was referred.
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Amount to Credit * <span style="color:var(--text-dim);font-size:12px">
+        (adjust if it differs from the claimed amount)</span></label>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px;font-weight:600">₵</span>
+        <input id="sd-appr-amt" type="number" step="0.01" min="0.01" value="${claimedAmount}" style="flex:1">
+      </div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Admin Note (optional)</label>
+      <textarea id="sd-appr-note" placeholder="MoMo transaction confirmed via network statement."></textarea>
+    </div>
+    <div id="sd-appr-msg"></div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-success" id="sd-appr-btn" onclick="approveSimpleDeposit('${id}')">✓ Confirm Approve</button>
+    </div>`);
+}
+
+async function approveSimpleDeposit(id) {
+  const creditedAmount = parseFloat(document.getElementById('sd-appr-amt').value);
+  const adminNote      = document.getElementById('sd-appr-note').value.trim();
+
+  if (!creditedAmount || creditedAmount <= 0) {
+    document.getElementById('sd-appr-msg').innerHTML =
+      '<div class="alert alert-error">✕ Enter a valid amount to credit.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('sd-appr-btn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Approving…';
+  try {
+    await api(`/api/admin/simple-deposits/${id}/approve`, 'POST', { creditedAmount, adminNote });
+    closeModal();
+    showAlert(`Deposit approved! ₵${fmt(creditedAmount)} credited to user wallet.`, 'success');
+    renderSimpleDeposits(simpleDepositPage);
+  } catch (e) {
+    document.getElementById('sd-appr-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    btn.disabled = false; btn.innerHTML = '✓ Confirm Approve';
+  }
+}
+
+function openRejectSimpleDeposit(id) {
+  openModal('Reject Simple Deposit', `
+    <div class="alert alert-warning" style="margin-bottom:14px">
+      ⚠ The user's wallet will <strong>NOT</strong> be credited. Your note will be stored on the record.
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Rejection Reason * (required)</label>
+      <textarea id="sd-rej-note" placeholder="Unable to confirm MoMo transaction from the given phone number."></textarea>
+    </div>
+    <div id="sd-rej-msg"></div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-danger" id="sd-rej-btn" onclick="rejectSimpleDeposit('${id}')">✕ Confirm Reject</button>
+    </div>`);
+}
+
+async function rejectSimpleDeposit(id) {
+  const adminNote = document.getElementById('sd-rej-note').value.trim();
+  if (!adminNote) {
+    document.getElementById('sd-rej-msg').innerHTML =
+      '<div class="alert alert-error">✕ Rejection reason is required.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('sd-rej-btn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
+  try {
+    await api(`/api/admin/simple-deposits/${id}/reject`, 'POST', { adminNote });
+    closeModal();
+    showAlert('Deposit rejected.', 'success');
+    renderSimpleDeposits(simpleDepositPage);
+  } catch (e) {
+    document.getElementById('sd-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    btn.disabled = false; btn.innerHTML = '✕ Confirm Reject';
+  }
+}
+
+async function exportSimpleDepositsCSV() {
+  const btn = document.querySelector('[onclick="exportSimpleDepositsCSV()"]');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
+  try {
+    let rows = [], p = 0, total = 1;
+    while (p < total) {
+      const isPendingTab = simpleDepositTab === 'pending';
+      const ep = isPendingTab
+        ? `/api/admin/simple-deposits/pending?page=${p}&size=100`
+        : `/api/admin/simple-deposits?page=${p}&size=100`;
+      const d = await api(ep);
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
+      p++;
+    }
+    if (!rows.length) { showAlert('No data to export.', 'error'); return; }
+
+    const headers = [
+      'ID', 'Phone Number', 'Account Name', 'Network', 'Purpose',
+      'Amount Claimed', 'Credited Amount', 'Status', 'Admin Note',
+      'Reviewed By', 'Reviewed At', 'Wallet Tx ID', 'Created At'
+    ];
+    exportCSV(
+      `simple-deposits-${simpleDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
+      headers,
+      rows.map(d => [
+        d.id, d.phoneNumber, d.accountName, d.network, d.purpose,
+        d.amount, d.creditedAmount ?? '', d.status, d.adminNote ?? '',
+        d.reviewedBy ?? '', d.reviewedAt ?? '', d.walletTransactionId ?? '', d.createdAt
+      ])
+    );
+    showAlert(`Exported ${rows.length} simple deposit rows!`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
