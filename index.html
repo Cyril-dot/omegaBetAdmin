@@ -49,6 +49,25 @@
   /* ---- Logo icon ---- */
   #sidebar-header .logo-icon .ms { font-size: 22px; }
   .auth-brand .logo-icon .ms     { font-size: 26px; }
+
+  /* ---- Simple Deposits nav badge ---- */
+  #nav-badge-simple-deposits {
+    display: none;
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    line-height: 1.5;
+  }
+
+  /* ---- Dashboard: simple deposits stat card ---- */
+  #sd-dashboard-card .stat[data-clickable="true"] {
+    cursor: pointer;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  #sd-dashboard-card .stat[data-clickable="true"]:hover {
+    transform: translateY(-2px);
+  }
 </style>
 </head>
 <body class="dashboard-layout">
@@ -110,9 +129,11 @@
       Bank Transfer Deposits
     </div>
     <div class="nav-item" data-page="simple-deposits"
-         onclick="navigate('simple-deposits');closeSidebar()" role="button" tabindex="0">
+         onclick="navigate('simple-deposits');closeSidebar()" role="button" tabindex="0"
+         style="position:relative">
       <span class="ms ms-outline">smartphone</span>
       Simple Deposits (MoMo)
+      <span id="nav-badge-simple-deposits" class="badge badge-yellow"></span>
     </div>
     <div class="nav-item" data-page="user-deposits"
          onclick="navigate('user-deposits');closeSidebar()" role="button" tabindex="0">
@@ -205,5 +226,168 @@
 
 
 <script src="app.js"></script>
+
+<!-- =====================================================================
+     SIMPLE DEPOSITS (MoMo) — DASHBOARD CARD + NAV BADGE
+     Self-contained: does not modify app.js. Injects a stat card onto the
+     dashboard page and keeps a live pending-count badge on the sidebar
+     nav item. Polls the same API app.js already talks to.
+     ===================================================================== -->
+<script>
+(function () {
+  const SD_POLL_MS = 30000; // re-check every 30s for "new deposit came in" feel
+
+  // ---- tiny helpers (kept local so we never touch app.js) ----
+  function sdApi(path) {
+    // Reuses the same config object app.js sets up (BASE_URL + token)
+    if (!window.config || !window.config.token) return Promise.reject(new Error('Not authenticated'));
+    return fetch(window.config.baseUrl + path, {
+      headers: { 'Authorization': 'Bearer ' + window.config.token, 'Content-Type': 'application/json' }
+    }).then(async res => {
+      let json;
+      try { json = await res.json(); } catch (e) { throw new Error('HTTP ' + res.status); }
+      if (!res.ok) throw new Error(json.message || json.error || ('HTTP ' + res.status));
+      return json.data !== undefined ? json.data : json;
+    });
+  }
+
+  function sdFmt(n) {
+    return Number(n || 0).toLocaleString('en-GH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // ---- nav badge ----
+  function updateNavBadge(count) {
+    const el = document.getElementById('nav-badge-simple-deposits');
+    if (!el) return;
+    if (count > 0) {
+      el.textContent = count > 99 ? '99+' : String(count);
+      el.style.display = 'inline-flex';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+
+  async function refreshNavBadge() {
+    try {
+      const pendingData = await sdApi('/api/admin/simple-deposits/pending?page=0&size=1');
+      updateNavBadge(pendingData.totalElements || 0);
+    } catch (e) { /* silent — badge just won't update this cycle */ }
+  }
+
+  // ---- dashboard stats (pending count + today's totals) ----
+  async function fetchStats() {
+    let pendingCount = 0, todayTotal = 0, todayCount = 0;
+
+    try {
+      const pendingData = await sdApi('/api/admin/simple-deposits/pending?page=0&size=1');
+      pendingCount = pendingData.totalElements || 0;
+    } catch (e) { /* leave at 0 */ }
+
+    try {
+      const todayStr = new Date().toDateString();
+      let p = 0, keepGoing = true, totalPages = 1;
+      while (keepGoing && p < totalPages && p < 10) {
+        const d = await sdApi(`/api/admin/simple-deposits?page=${p}&size=50&sort=createdAt,desc`);
+        const list = d.content || [];
+        totalPages = d.totalPages || 1;
+        if (!list.length) break;
+        for (const dep of list) {
+          if (new Date(dep.createdAt).toDateString() === todayStr) {
+            todayCount++;
+            todayTotal += Number(dep.amount || 0);
+          } else {
+            keepGoing = false;
+            break;
+          }
+        }
+        p++;
+      }
+    } catch (e) { /* leave at 0 */ }
+
+    return { pendingCount, todayTotal, todayCount };
+  }
+
+  // ---- inject the card into the dashboard page ----
+  function buildCardHtml(stats) {
+    return `
+      <div id="sd-dashboard-card">
+        <div class="section-title">
+          📱 Simple Deposits (MoMo)
+          ${stats.pendingCount > 0 ? `<span class="badge badge-yellow" style="margin-left:8px">${stats.pendingCount} pending</span>` : ''}
+        </div>
+        <div class="stat-grid">
+          <div class="stat" data-clickable="true" onclick="navigate('simple-deposits')" title="Go to Simple Deposits queue">
+            <span class="stat-icon">⏳</span>
+            <div class="stat-label">Pending Review</div>
+            <div class="stat-value">${Number(stats.pendingCount).toLocaleString()}</div>
+            <div class="stat-sub">${stats.pendingCount > 0 ? 'Needs action' : 'All caught up'}</div>
+          </div>
+          <div class="stat">
+            <span class="stat-icon">📆</span>
+            <div class="stat-label">Submitted Today</div>
+            <div class="stat-value">${Number(stats.todayCount).toLocaleString()}</div>
+          </div>
+          <div class="stat">
+            <span class="stat-icon">💵</span>
+            <div class="stat-label">Total Claimed Today</div>
+            <div class="stat-value">₵${sdFmt(stats.todayTotal)}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  async function injectDashboardCard() {
+    const pageContent = document.getElementById('page-content');
+    if (!pageContent || document.querySelector('.nav-item.active')?.dataset.page !== 'dashboard') return;
+
+    // Avoid duplicate cards if this runs more than once on the same render
+    const existing = document.getElementById('sd-dashboard-card');
+    if (existing) existing.remove();
+
+    let stats;
+    try {
+      stats = await fetchStats();
+    } catch (e) {
+      return; // dashboard's own content already rendered; fail silently
+    }
+
+    // Re-check we're still on the dashboard (user may have navigated during the fetch)
+    if (document.querySelector('.nav-item.active')?.dataset.page !== 'dashboard') return;
+    if (!document.getElementById('page-content')) return;
+
+    document.getElementById('page-content').insertAdjacentHTML('beforeend', buildCardHtml(stats));
+    updateNavBadge(stats.pendingCount);
+  }
+
+  // ---- hook into navigation without touching app.js ----
+  // app.js's navigate() re-renders #page-content every time it's called,
+  // so we watch for that and re-inject our card whenever the dashboard page loads.
+  const observer = new MutationObserver(() => {
+    if (document.querySelector('.nav-item.active')?.dataset.page === 'dashboard') {
+      // Debounce: wait a tick for the dashboard's own async render to settle
+      clearTimeout(window.__sdInjectTimer);
+      window.__sdInjectTimer = setTimeout(injectDashboardCard, 400);
+    }
+  });
+
+  function startObserving() {
+    const target = document.getElementById('page-content');
+    if (!target) { setTimeout(startObserving, 300); return; }
+    observer.observe(target, { childList: true, subtree: false });
+  }
+
+  // ---- init ----
+  window.addEventListener('load', () => {
+    // Give app.js's own window.onload (auth check + renderDashboard) time to run first
+    setTimeout(() => {
+      refreshNavBadge();
+      injectDashboardCard();
+      startObserving();
+      setInterval(refreshNavBadge, SD_POLL_MS);
+    }, 600);
+  });
+})();
+</script>
+
 </body>
 </html>
