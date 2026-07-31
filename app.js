@@ -1,9 +1,21 @@
+// ============================================================
+// SPEEDBET — SUPER ADMIN PANEL
+// ============================================================
+// Changes in this revision:
+//   • Commission analytics now toggles between an all-admin overview and a
+//     single-admin drill-down (section 14). Data is fetched once per range
+//     and grouped client-side, so switching admins costs zero requests.
+//   • All user-controlled strings are escaped before hitting innerHTML.
+//   • Detail modals read from a row cache instead of JSON-in-onclick.
+//   • api() redirects to sign-in on 401 instead of showing a red banner.
+// ============================================================
+
 // ==================== CONFIG ====================
 const BASE_URL = 'https://futballbackend-production-f14d.up.railway.app';
 let config = { baseUrl: BASE_URL, token: '' };
 
 // ==================== SIDEBAR ====================
-function openSidebar()  {
+function openSidebar() {
   document.getElementById('sidebar').classList.add('open');
   document.getElementById('sidebar-overlay').classList.add('open');
 }
@@ -19,10 +31,16 @@ function logout() {
   window.location.href = 'auth.html';
 }
 
+function forceSignIn(reason) {
+  localStorage.removeItem('fb_token');
+  const q = reason ? `?reason=${encodeURIComponent(reason)}` : '';
+  window.location.href = `auth.html${q}`;
+}
+
 // ==================== API ====================
 async function api(path, method = 'GET', body = null) {
-  if (!config.token)
-    throw new Error('Not authenticated — please sign in again.');
+  if (!config.token) throw new Error('Not authenticated — please sign in again.');
+
   const opts = {
     method,
     headers: {
@@ -31,13 +49,30 @@ async function api(path, method = 'GET', body = null) {
     }
   };
   if (body !== null) opts.body = JSON.stringify(body);
-  const res  = await fetch(config.baseUrl + path, opts);
+
+  const res = await fetch(config.baseUrl + path, opts);
+
+  // Session expired — bounce to sign-in rather than painting every panel red.
+  if (res.status === 401) {
+    forceSignIn('expired');
+    throw new Error('Session expired. Redirecting to sign in…');
+  }
+
   let json;
-  try { json = await res.json(); } catch(e) { throw new Error(`HTTP ${res.status} — no JSON body`); }
+  try {
+    json = await res.json();
+  } catch (e) {
+    throw new Error(`HTTP ${res.status} — no JSON body`);
+  }
+
   if (!res.ok) {
-    const msg = json.message || json.error || (json.errors && JSON.stringify(json.errors)) || `HTTP ${res.status}`;
+    if (res.status === 403) throw new Error('You do not have permission to do that.');
+    if (res.status === 404) throw new Error(`Endpoint not found (404): ${path}`);
+    const msg = json.message || json.error ||
+      (json.errors && JSON.stringify(json.errors)) || `HTTP ${res.status}`;
     throw new Error(msg);
   }
+
   return json.data !== undefined ? json.data : json;
 }
 
@@ -45,10 +80,10 @@ async function api(path, method = 'GET', body = null) {
 function showAlert(msg, type = 'info', duration = 4500) {
   const el = document.getElementById('alert-container');
   if (!el) return;
-  const icons = { success:'✓', error:'✕', info:'ℹ', warning:'⚠' };
+  const icons = { success: '✓', error: '✕', info: 'ℹ', warning: '⚠' };
   const div = document.createElement('div');
   div.className = `alert alert-${type}`;
-  div.innerHTML = `<span>${icons[type]||'ℹ'}</span><span>${msg}</span>`;
+  div.innerHTML = `<span>${icons[type] || 'ℹ'}</span><span>${esc(msg)}</span>`;
   el.appendChild(div);
   setTimeout(() => div.remove(), duration);
 }
@@ -64,86 +99,179 @@ function closeModal(e) {
   if (!e || e.target === document.getElementById('modal-bg'))
     document.getElementById('modal-bg').classList.remove('open');
 }
+function modalIsOpen() {
+  const m = document.getElementById('modal-bg');
+  return !!m && m.classList.contains('open');
+}
+function setModalContent(html) {
+  const el = document.getElementById('modal-content');
+  if (el) el.innerHTML = html;
+}
+
+// Escape key closes the modal.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && modalIsOpen())
+    document.getElementById('modal-bg').classList.remove('open');
+});
 
 // ==================== UTILS ====================
-function fmt(n)      { return Number(n).toLocaleString('en-GH', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
-function fmtDate(d)  { return d ? new Date(d).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '—'; }
-function truncate(s, n=28) { return s && s.length > n ? s.slice(0,n)+'…' : (s||'—'); }
-function coalesce(...args) { for (const a of args) if (a !== null && a !== undefined && a !== '') return a; return '—'; }
+
+/** Escape untrusted text before it goes anywhere near innerHTML. */
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmt(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return '0.00';
+  return v.toLocaleString('en-GH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtInt(n) {
+  const v = Number(n);
+  return isFinite(v) ? v.toLocaleString() : '0';
+}
+
+function fmtDate(d) {
+  if (!d) return '—';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '—';
+  return dt.toLocaleString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function truncate(s, n = 28) {
+  if (s === null || s === undefined || s === '') return '—';
+  const str = String(s);
+  return str.length > n ? str.slice(0, n) + '…' : str;
+}
+
+function coalesce(...args) {
+  for (const a of args) if (a !== null && a !== undefined && a !== '') return a;
+  return '—';
+}
+
+/** Escaped truncate — use for anything user-supplied. */
+function truncEsc(s, n = 28) { return esc(truncate(s, n)); }
 
 // ── Deposit type helpers ──────────────────────────────────────────────────────
 // Amounts below 30,000 are MoMo deposits (GHS ₵).
 // Amounts 30,000+ are NGN bank transfers (₦).
-function isMomo(amount)          { return Number(amount) < 30000; }
-function depositSymbol(amount)   { return isMomo(amount) ? '₵' : '₦'; }
-function depositLabel(amount)    { return isMomo(amount) ? 'MoMo' : 'Bank Transfer'; }
+// NOTE: this infers currency from magnitude. A genuine ₵35,000 MoMo deposit
+// will display as ₦. Storing the currency on the record would remove the guess.
+function isMomo(amount) { return Number(amount) < 30000; }
+function depositSymbol(amount) { return isMomo(amount) ? '₵' : '₦'; }
+function depositLabel(amount) { return isMomo(amount) ? 'MoMo' : 'Bank Transfer'; }
 function depositCurrency(amount) { return isMomo(amount) ? 'GHS' : 'NGN'; }
 
 function statusBadge(s) {
   const map = {
-    COMPLETED:'badge-green', APPROVED:'badge-green', PROCESSED:'badge-green',
-    PAID:'badge-green', COMMISSION_SET:'badge-green', CLOSED:'badge-gray',
-    SETTLED:'badge-green',
-    PENDING:'badge-yellow', PENDING_COMMISSION:'badge-yellow', REQUESTED:'badge-yellow',
-    FAILED:'badge-red', REJECTED:'badge-red',
-    ADMIN:'badge-blue', SUPER_ADMIN:'badge-purple', USER:'badge-gray',
-    ACTIVE:'badge-green', DISABLED:'badge-red', SUSPENDED:'badge-red'
+    COMPLETED: 'badge-green', APPROVED: 'badge-green', PROCESSED: 'badge-green',
+    PAID: 'badge-green', COMMISSION_SET: 'badge-green', CLOSED: 'badge-gray',
+    SETTLED: 'badge-green',
+    PENDING: 'badge-yellow', PENDING_COMMISSION: 'badge-yellow', REQUESTED: 'badge-yellow',
+    FAILED: 'badge-red', REJECTED: 'badge-red',
+    ADMIN: 'badge-blue', SUPER_ADMIN: 'badge-purple', USER: 'badge-gray',
+    ACTIVE: 'badge-green', DISABLED: 'badge-red', SUSPENDED: 'badge-red'
   };
-  return `<span class="badge ${map[s]||'badge-gray'}">${s||'—'}</span>`;
-}
-function kindBadge(k) {
-  const map = {
-    DEPOSIT:'badge-green', WITHDRAW:'badge-red', WITHDRAW_HOLD:'badge-yellow',
-    WITHDRAW_RELEASE:'badge-blue', BET_STAKE:'badge-yellow', BET_WIN:'badge-blue',
-    REFERRAL_COMMISSION:'badge-purple', PAYOUT:'badge-red', ADJUSTMENT:'badge-gray',
-    VIP_CASHBACK:'badge-purple', VIP_MEMBERSHIP:'badge-purple',
-    WELCOME_BONUS:'badge-blue', WITHDRAWAL_REFUND:'badge-yellow', ADMIN_UPGRADE_FEE:'badge-yellow'
-  };
-  return `<span class="badge ${map[k]||'badge-gray'}">${k||'—'}</span>`;
-}
-function networkBadge(n) {
-  const map = { MTN:'badge-yellow', TELECEL:'badge-blue', AIRTELTIGO:'badge-red' };
-  return `<span class="badge ${map[n]||'badge-gray'}">${n||'—'}</span>`;
-}
-function purposeBadge(p) {
-  const map = { WALLET_FUNDING:'badge-green', CASINO_PLAY:'badge-purple', OTHER:'badge-gray' };
-  return `<span class="badge ${map[p]||'badge-gray'}">${p||'—'}</span>`;
+  return `<span class="badge ${map[s] || 'badge-gray'}">${esc(s) || '—'}</span>`;
 }
 
-function loading(msg='Loading…') {
-  return `<div class="loading-row"><span class="spinner"></span>${msg}</div>`;
+function kindBadge(k) {
+  const map = {
+    DEPOSIT: 'badge-green', WITHDRAW: 'badge-red', WITHDRAW_HOLD: 'badge-yellow',
+    WITHDRAW_RELEASE: 'badge-blue', BET_STAKE: 'badge-yellow', BET_WIN: 'badge-blue',
+    REFERRAL_COMMISSION: 'badge-purple', PAYOUT: 'badge-red', ADJUSTMENT: 'badge-gray',
+    VIP_CASHBACK: 'badge-purple', VIP_MEMBERSHIP: 'badge-purple',
+    WELCOME_BONUS: 'badge-blue', WITHDRAWAL_REFUND: 'badge-yellow', ADMIN_UPGRADE_FEE: 'badge-yellow'
+  };
+  return `<span class="badge ${map[k] || 'badge-gray'}">${esc(k) || '—'}</span>`;
 }
-function empty(msg='No records found.') {
-  return `<div class="empty"><div class="empty-icon">📭</div>${msg}</div>`;
+
+function networkBadge(n) {
+  const map = { MTN: 'badge-yellow', TELECEL: 'badge-blue', AIRTELTIGO: 'badge-red' };
+  return `<span class="badge ${map[n] || 'badge-gray'}">${esc(n) || '—'}</span>`;
 }
+
+function purposeBadge(p) {
+  const map = { WALLET_FUNDING: 'badge-green', CASINO_PLAY: 'badge-purple', OTHER: 'badge-gray' };
+  return `<span class="badge ${map[p] || 'badge-gray'}">${esc(p) || '—'}</span>`;
+}
+
+function loading(msg = 'Loading…') {
+  return `<div class="loading-row"><span class="spinner"></span>${esc(msg)}</div>`;
+}
+
+function empty(msg = 'No records found.') {
+  return `<div class="empty"><div class="empty-icon">📭</div>${esc(msg)}</div>`;
+}
+
+function errorBox(msg) {
+  return `<div class="alert alert-error">✕ ${esc(msg)}</div>`;
+}
+
 function labeledTd(label, content) {
-  return `<td data-label="${label}">${content}</td>`;
+  return `<td data-label="${esc(label)}">${content}</td>`;
 }
+
 function detailRow(key, val) {
-  const v = (val !== null && val !== undefined && val !== '') ? val : '<span style="color:var(--text-dim)">—</span>';
-  return `<div class="detail-item"><div class="key">${key}</div><div class="val">${v}</div></div>`;
+  const v = (val !== null && val !== undefined && val !== '')
+    ? val : '<span style="color:var(--text-dim)">—</span>';
+  return `<div class="detail-item"><div class="key">${esc(key)}</div><div class="val">${v}</div></div>`;
 }
 
 function paginator(page, totalPages, onPage) {
-  if (totalPages <= 1) return '';
+  if (!totalPages || totalPages <= 1) return '';
   return `<div class="pager">
-    <button class="btn-ghost btn-sm" onclick="${onPage}(${page-1})" ${page===0?'disabled':''}>← Prev</button>
-    <span class="pager-info">Page ${page+1} of ${totalPages}</span>
-    <button class="btn-ghost btn-sm" onclick="${onPage}(${page+1})" ${page>=totalPages-1?'disabled':''}>Next →</button>
+    <button class="btn-ghost btn-sm" onclick="${onPage}(${page - 1})" ${page === 0 ? 'disabled' : ''}>← Prev</button>
+    <span class="pager-info">Page ${page + 1} of ${totalPages}</span>
+    <button class="btn-ghost btn-sm" onclick="${onPage}(${page + 1})" ${page >= totalPages - 1 ? 'disabled' : ''}>Next →</button>
   </div>`;
+}
+
+/** Horizontal proportion bar for at-a-glance comparison inside tables. */
+function miniBar(value, max, color = 'var(--green-text)') {
+  const v = Number(value) || 0;
+  const pct = max > 0 ? Math.max(v > 0 ? 2 : 0, (v / max) * 100) : 0;
+  return `<div style="height:6px;min-width:70px;border-radius:3px;background:rgba(127,127,127,.18);overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${color};border-radius:3px"></div>
+          </div>`;
+}
+
+function statCard(icon, label, value, sub = '', color = '') {
+  return `<div class="stat">
+    <span class="stat-icon">${icon}</span>
+    <div class="stat-label">${esc(label)}</div>
+    <div class="stat-value"${color ? ` style="color:${color}"` : ''}>${value}</div>
+    ${sub ? `<div class="stat-sub">${sub}</div>` : ''}
+  </div>`;
+}
+
+// ==================== ROW CACHE ====================
+// Detail modals used to receive a JSON.stringify'd row through an onclick
+// attribute, which breaks on quotes/newlines and is an injection vector.
+// Rows are stashed here and looked up by id instead.
+const rowCache = { withdrawals: {}, transactions: {} };
+
+function cacheRows(bucket, rows) {
+  rowCache[bucket] = {};
+  for (const r of rows) if (r && r.id) rowCache[bucket][r.id] = r;
 }
 
 // ==================== CSV EXPORT ====================
 function exportCSV(filename, headers, rows) {
-  const esc = v => {
+  const escCsv = v => {
     const s = (v === null || v === undefined) ? '' : String(v);
     return (s.includes(',') || s.includes('"') || s.includes('\n'))
-      ? `"${s.replace(/"/g,'""')}"` : s;
+      ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const csv = [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))].join('\n');
-  const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
+  const csv = [headers.map(escCsv).join(','), ...rows.map(r => r.map(escCsv).join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
   a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
 }
@@ -153,34 +281,36 @@ let currentPage = 'dashboard';
 
 function navigate(page) {
   currentPage = page;
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  document.querySelectorAll('.nav-item')
+    .forEach(n => n.classList.toggle('active', n.dataset.page === page));
   const titles = {
-    dashboard:'Dashboard', admins:'Admin Accounts', users:'All Users',
-    transactions:'Platform Transactions', binance:'Crypto Deposits',
-    'bank-deposits':'Bank Transfer & MoMo Deposits',
-    'upgrade-chats':'Admin Upgrade Chats', 'affiliate-withdrawals':'Affiliate Withdrawals',
-    'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
-    'withdrawals':'Withdrawal Requests',
-    'user-deposits':'User Deposit History',
-    'simple-deposits':'Simple Deposits (MoMo)',
-    'commission-analytics':'Commission & Deposit Analytics'
+    dashboard: 'Dashboard', admins: 'Admin Accounts', users: 'All Users',
+    transactions: 'Platform Transactions', binance: 'Crypto Deposits',
+    'bank-deposits': 'Bank Transfer & MoMo Deposits',
+    'upgrade-chats': 'Admin Upgrade Chats', 'affiliate-withdrawals': 'Affiliate Withdrawals',
+    'payout-requests': 'Payout Requests', 'audit-log': 'Audit Log',
+    'withdrawals': 'Withdrawal Requests',
+    'user-deposits': 'User Deposit History',
+    'simple-deposits': 'Simple Deposits (MoMo)',
+    'commission-analytics': 'Commission & Deposit Analytics'
   };
   document.getElementById('page-title').textContent = titles[page] || page;
   document.getElementById('alert-container').innerHTML = '';
+  closeSidebar();
   reloadPage();
 }
 
 function reloadPage() {
   const pages = {
-    dashboard:renderDashboard, admins:renderAdmins, users:renderUsers,
-    transactions:renderTransactions, binance:renderBinance,
-    'bank-deposits':renderBankDeposits,
-    'upgrade-chats':renderUpgradeChats, 'affiliate-withdrawals':renderAffiliateWithdrawals,
-    'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
-    'withdrawals':renderWithdrawals,
-    'user-deposits':renderUserDeposits,
-    'simple-deposits':renderSimpleDeposits,
-    'commission-analytics':renderCommissionAnalytics
+    dashboard: renderDashboard, admins: renderAdmins, users: renderUsers,
+    transactions: renderTransactions, binance: renderBinance,
+    'bank-deposits': renderBankDeposits,
+    'upgrade-chats': renderUpgradeChats, 'affiliate-withdrawals': renderAffiliateWithdrawals,
+    'payout-requests': renderPayoutRequests, 'audit-log': renderAuditLog,
+    'withdrawals': renderWithdrawals,
+    'user-deposits': renderUserDeposits,
+    'simple-deposits': renderSimpleDeposits,
+    'commission-analytics': renderCommissionAnalytics
   };
   (pages[currentPage] || renderDashboard)();
 }
@@ -196,57 +326,38 @@ async function renderDashboard() {
       api('/api/super-admin/metrics'),
       api('/api/super-admin/metrics/deposits')
     ]);
+
+    const netFlow = Number(rev.totalDepositsAllTime || 0) - Number(rev.totalWithdrawalsAllTime || 0);
+
     c.innerHTML = `
       <div class="stat-grid">
-        <div class="stat">
-          <span class="stat-icon">👥</span>
-          <div class="stat-label">Total Users</div>
-          <div class="stat-value">${Number(metrics.totalUsers).toLocaleString()}</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">👤</span>
-          <div class="stat-label">Total Admins</div>
-          <div class="stat-value">${Number(metrics.totalAdmins).toLocaleString()}</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">🌐</span>
-          <div class="stat-label">Platform</div>
-          <div class="stat-value" style="font-size:17px">${metrics.platform}</div>
-        </div>
+        ${statCard('👥', 'Total Users', fmtInt(metrics.totalUsers))}
+        ${statCard('👤', 'Total Admins', fmtInt(metrics.totalAdmins))}
+        ${statCard('🌐', 'Platform', `<span style="font-size:17px">${esc(metrics.platform)}</span>`)}
       </div>
 
-      <div class="section-title">💰 Revenue Overview — ${rev.currency}</div>
+      <div class="section-title">💰 Revenue Overview — ${esc(rev.currency || 'GHS')}</div>
       <div class="stat-grid">
-        <div class="stat">
-          <span class="stat-icon">📥</span>
-          <div class="stat-label">Deposits All Time</div>
-          <div class="stat-value">₵${fmt(rev.totalDepositsAllTime)}</div>
-          <div class="stat-sub">${Number(rev.totalDepositCount).toLocaleString()} transactions</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">📅</span>
-          <div class="stat-label">Deposits This Month</div>
-          <div class="stat-value">₵${fmt(rev.totalDepositsThisMonth)}</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">📆</span>
-          <div class="stat-label">Deposits Today</div>
-          <div class="stat-value">₵${fmt(rev.totalDepositsToday)}</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">📤</span>
-          <div class="stat-label">Withdrawals All Time</div>
-          <div class="stat-value" style="color:var(--red-text)">₵${fmt(rev.totalWithdrawalsAllTime)}</div>
-          <div class="stat-sub">${Number(rev.totalWithdrawalCount).toLocaleString()} transactions</div>
-        </div>
-        <div class="stat">
-          <span class="stat-icon">📉</span>
-          <div class="stat-label">Withdrawals This Month</div>
-          <div class="stat-value" style="color:var(--red-text)">₵${fmt(rev.totalWithdrawalsThisMonth)}</div>
-        </div>
+        ${statCard('📥', 'Deposits All Time', `₵${fmt(rev.totalDepositsAllTime)}`,
+          `${fmtInt(rev.totalDepositCount)} transactions`)}
+        ${statCard('📅', 'Deposits This Month', `₵${fmt(rev.totalDepositsThisMonth)}`)}
+        ${statCard('📆', 'Deposits Today', `₵${fmt(rev.totalDepositsToday)}`)}
+        ${statCard('📤', 'Withdrawals All Time', `₵${fmt(rev.totalWithdrawalsAllTime)}`,
+          `${fmtInt(rev.totalWithdrawalCount)} transactions`, 'var(--red-text)')}
+        ${statCard('📉', 'Withdrawals This Month', `₵${fmt(rev.totalWithdrawalsThisMonth)}`,
+          '', 'var(--red-text)')}
+        ${statCard('⚖️', 'Net Position', `₵${fmt(netFlow)}`,
+          'deposits minus withdrawals, all time',
+          netFlow >= 0 ? 'var(--green-text)' : 'var(--red-text)')}
+      </div>
+
+      <div style="display:flex;gap:8px;padding-top:16px;flex-wrap:wrap">
+        <button class="btn-ghost btn-sm" onclick="navigate('commission-analytics')">📊 Open analytics</button>
+        <button class="btn-ghost btn-sm" onclick="navigate('simple-deposits')">⏳ Review pending deposits</button>
+        <button class="btn-ghost btn-sm" onclick="navigate('withdrawals')">💸 Review withdrawals</button>
       </div>`;
   } catch (e) {
-    c.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    c.innerHTML = errorBox(e.message);
   }
 }
 
@@ -266,19 +377,25 @@ async function renderAdmins() {
   try {
     const data = await api('/api/super-admin/admins');
     const list = Array.isArray(data) ? data : (data.content || []);
-    if (!list.length) { document.getElementById('admins-list').innerHTML = empty('No admins found.'); return; }
+    if (!list.length) {
+      document.getElementById('admins-list').innerHTML = empty('No admins found.');
+      return;
+    }
     document.getElementById('admins-list').innerHTML = `
       <div class="tbl-wrap"><table>
         <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
         <tbody>${list.map(a => `<tr>
-          ${labeledTd('Name', `${a.firstName||''} ${a.lastName||''}`.trim()||'—')}
-          ${labeledTd('Email', a.email)}
+          ${labeledTd('Name', esc(`${a.firstName || ''} ${a.lastName || ''}`.trim()) || '—')}
+          ${labeledTd('Email', esc(a.email))}
           ${labeledTd('Role', statusBadge(a.role))}
-          ${labeledTd('Actions', `<button class="btn-ghost btn-sm" onclick="viewAdmin('${a.id}')">View Detail</button>`)}
+          ${labeledTd('Actions', `<div class="btn-row">
+            <button class="btn-ghost btn-sm" onclick="viewAdmin('${esc(a.id)}')">View Detail</button>
+            <button class="btn-ghost btn-sm" onclick="openAdminAnalytics('${esc(a.id)}')">📊 Commission</button>
+          </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>`;
   } catch (e) {
-    document.getElementById('admins-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('admins-list').innerHTML = errorBox(e.message);
   }
 }
 
@@ -286,40 +403,44 @@ async function viewAdmin(id) {
   openModal('Admin Detail', loading());
   try {
     const d = await api(`/api/super-admin/admins/${id}`);
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="section-title">Profile</div>
       <div class="detail-grid">
-        ${detailRow('ID',             `<span class="mono">${d.id}</span>`)}
-        ${detailRow('Email',          d.email)}
-        ${detailRow('Name',           `${d.firstName||''} ${d.lastName||''}`.trim())}
-        ${detailRow('Phone',          d.phone)}
-        ${detailRow('Country',        d.country)}
-        ${detailRow('Role',           statusBadge(d.role))}
+        ${detailRow('ID', `<span class="mono">${esc(d.id)}</span>`)}
+        ${detailRow('Email', esc(d.email))}
+        ${detailRow('Name', esc(`${d.firstName || ''} ${d.lastName || ''}`.trim()))}
+        ${detailRow('Phone', esc(d.phone))}
+        ${detailRow('Country', esc(d.country))}
+        ${detailRow('Role', statusBadge(d.role))}
         ${detailRow('Email Verified', d.emailVerified ? '✅ Yes' : '❌ No')}
-        ${detailRow('Created',        fmtDate(d.createdAt))}
+        ${detailRow('Created', fmtDate(d.createdAt))}
       </div>
       ${d.wallet ? `
         <div class="section-title">Wallet</div>
         <div class="detail-grid">
-          ${detailRow('Wallet ID',          `<span class="mono">${d.wallet.walletId}</span>`)}
-          ${detailRow('Balance',            `₵${fmt(d.wallet.balance)}`)}
-          ${detailRow('Currency',           d.wallet.currency)}
-          ${detailRow('Total Deposited',    `₵${fmt(d.wallet.totalDeposited)}`)}
-          ${detailRow('Total Withdrawn',    `₵${fmt(d.wallet.totalWithdrawn)}`)}
-          ${detailRow('Total Transactions', d.wallet.totalTransactions)}
+          ${detailRow('Wallet ID', `<span class="mono">${esc(d.wallet.walletId)}</span>`)}
+          ${detailRow('Balance', `₵${fmt(d.wallet.balance)}`)}
+          ${detailRow('Currency', esc(d.wallet.currency))}
+          ${detailRow('Total Deposited', `₵${fmt(d.wallet.totalDeposited)}`)}
+          ${detailRow('Total Withdrawn', `₵${fmt(d.wallet.totalWithdrawn)}`)}
+          ${detailRow('Total Transactions', fmtInt(d.wallet.totalTransactions))}
         </div>` : ''}
       ${d.referral ? `
         <div class="section-title">Referral Link</div>
         <div class="detail-grid">
-          ${detailRow('Link ID',           `<span class="mono">${d.referral.linkId}</span>`)}
-          ${detailRow('Code',              d.referral.code)}
-          ${detailRow('Commission Rate',   `${d.referral.commissionPercent}%`)}
-          ${detailRow('Total Referrals',   d.referral.totalReferrals ?? 'N/A')}
-          ${detailRow('Total Earnings',    d.referral.totalEarnings  != null ? '₵'+fmt(d.referral.totalEarnings) : 'N/A')}
+          ${detailRow('Link ID', `<span class="mono">${esc(d.referral.linkId)}</span>`)}
+          ${detailRow('Code', esc(d.referral.code))}
+          ${detailRow('Commission Rate', `${esc(d.referral.commissionPercent)}%`)}
+          ${detailRow('Total Referrals', d.referral.totalReferrals ?? 'N/A')}
+          ${detailRow('Total Earnings', d.referral.totalEarnings != null
+            ? '₵' + fmt(d.referral.totalEarnings) : 'N/A')}
         </div>` : ''}
-      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+      <div class="modal-footer">
+        <button class="btn-ghost btn-sm" onclick="closeModal();openAdminAnalytics('${esc(d.id)}')">📊 Commission history</button>
+        <button class="btn-ghost" onclick="closeModal()">Close</button>
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
@@ -345,12 +466,14 @@ function openCreateAdminModal() {
 }
 
 async function createAdmin() {
-  const email     = document.getElementById('ca-email').value.trim();
-  const password  = document.getElementById('ca-pass').value;
+  const email = document.getElementById('ca-email').value.trim();
+  const password = document.getElementById('ca-pass').value;
   const firstName = document.getElementById('ca-fn').value.trim();
-  const lastName  = document.getElementById('ca-ln').value.trim();
+  const lastName = document.getElementById('ca-ln').value.trim();
+
   if (!email || !password || !firstName) {
-    document.getElementById('ca-msg').innerHTML = '<div class="alert alert-error">✕ Email, password and first name are required.</div>';
+    document.getElementById('ca-msg').innerHTML =
+      errorBox('Email, password and first name are required.');
     return;
   }
   const btn = document.getElementById('ca-btn');
@@ -358,10 +481,10 @@ async function createAdmin() {
   try {
     await api('/api/super-admin/admins', 'POST', { email, password, firstName, lastName });
     closeModal();
-    showAlert('Admin created successfully!', 'success');
+    showAlert('Admin created.', 'success');
     renderAdmins();
   } catch (e) {
-    document.getElementById('ca-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('ca-msg').innerHTML = errorBox(e.message);
     btn.disabled = false; btn.innerHTML = 'Create Admin';
   }
 }
@@ -382,60 +505,66 @@ async function renderUsers(page = 0) {
           <div class="form-group" style="flex:1;min-width:180px">
             <label>Search (email / name)</label>
             <input id="usr-search" type="text" placeholder="john@example.com…"
-              value="${usersSearch}"
+              value="${esc(usersSearch)}"
               oninput="usersSearch=this.value"
               onkeydown="if(event.key==='Enter')renderUsers(0)">
           </div>
           <div class="form-group">
             <label>Role</label>
             <select onchange="usersRole=this.value;renderUsers(0)">
-              <option value=""             ${usersRole===''?'selected':''}>All roles</option>
-              <option value="USER"         ${usersRole==='USER'?'selected':''}>USER</option>
-              <option value="ADMIN"        ${usersRole==='ADMIN'?'selected':''}>ADMIN</option>
-              <option value="SUPER_ADMIN"  ${usersRole==='SUPER_ADMIN'?'selected':''}>SUPER_ADMIN</option>
+              <option value=""            ${usersRole === '' ? 'selected' : ''}>All roles</option>
+              <option value="USER"        ${usersRole === 'USER' ? 'selected' : ''}>USER</option>
+              <option value="ADMIN"       ${usersRole === 'ADMIN' ? 'selected' : ''}>ADMIN</option>
+              <option value="SUPER_ADMIN" ${usersRole === 'SUPER_ADMIN' ? 'selected' : ''}>SUPER_ADMIN</option>
             </select>
           </div>
           <button class="btn-primary" style="align-self:flex-end" onclick="renderUsers(0)">Search</button>
-          <button class="btn-ghost"   style="align-self:flex-end" onclick="usersSearch='';usersRole='';renderUsers(0)">Clear</button>
+          <button class="btn-ghost" style="align-self:flex-end"
+            onclick="usersSearch='';usersRole='';renderUsers(0)">Clear</button>
         </div>
         <div id="users-list">${loading()}</div>
       </div>
     </div>`;
+
   try {
     let q = `?page=${usersPage}&size=20`;
     if (usersSearch && usersSearch.trim()) q += `&search=${encodeURIComponent(usersSearch.trim())}`;
-    if (usersRole)                         q += `&role=${usersRole}`;
+    if (usersRole) q += `&role=${encodeURIComponent(usersRole)}`;
 
     const data = await api(`/api/super-admin/users${q}`);
     const list = data.content || [];
+
     document.getElementById('users-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Country</th><th>Role</th><th>Status</th><th>Verified</th><th>Joined</th><th>Actions</th></tr></thead>
+        <thead><tr>
+          <th>Name</th><th>Email</th><th>Phone</th><th>Country</th>
+          <th>Role</th><th>Status</th><th>Verified</th><th>Joined</th><th>Actions</th>
+        </tr></thead>
         <tbody>${list.map(u => `<tr>
-          ${labeledTd('Name',     `${u.firstName||''} ${u.lastName||''}`.trim()||'—')}
-          ${labeledTd('Email',    u.email)}
-          ${labeledTd('Phone',    `<span class="mono">${u.phone||'—'}</span>`)}
-          ${labeledTd('Country',  u.country||'—')}
-          ${labeledTd('Role',     statusBadge(u.role))}
-          ${labeledTd('Status',   statusBadge(u.status || 'ACTIVE'))}
+          ${labeledTd('Name', esc(`${u.firstName || ''} ${u.lastName || ''}`.trim()) || '—')}
+          ${labeledTd('Email', esc(u.email))}
+          ${labeledTd('Phone', `<span class="mono">${esc(u.phone) || '—'}</span>`)}
+          ${labeledTd('Country', esc(u.country) || '—')}
+          ${labeledTd('Role', statusBadge(u.role))}
+          ${labeledTd('Status', statusBadge(u.status || 'ACTIVE'))}
           ${labeledTd('Verified', u.emailVerified ? '✅' : '❌')}
-          ${labeledTd('Joined',   `<span class="mono">${fmtDate(u.createdAt)}</span>`)}
-          ${labeledTd('Actions',  `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick="viewUser('${u.id}')">View</button>
+          ${labeledTd('Joined', `<span class="mono">${fmtDate(u.createdAt)}</span>`)}
+          ${labeledTd('Actions', `<div class="btn-row">
+            <button class="btn-ghost btn-sm" onclick="viewUser('${esc(u.id)}')">View</button>
             ${u.role !== 'SUPER_ADMIN' ? (
               (u.status || 'ACTIVE') === 'ACTIVE'
-                ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${u.id}','deactivate')">🚫 Deactivate</button>`
-                : `<button class="btn-success btn-sm" onclick="changeUserStatus('${u.id}','activate')">✓ Activate</button>`
+                ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${esc(u.id)}','deactivate')">🚫 Deactivate</button>`
+                : `<button class="btn-success btn-sm" onclick="changeUserStatus('${esc(u.id)}','activate')">✓ Activate</button>`
             ) : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total users</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total users</span>
         ${paginator(usersPage, data.totalPages, 'renderUsers')}
-      </div>` : empty('No users found.');
+      </div>` : empty('No users match that search.');
   } catch (e) {
-    document.getElementById('users-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('users-list').innerHTML = errorBox(e.message);
   }
 }
 
@@ -444,48 +573,48 @@ async function viewUser(id) {
   try {
     const d = await api(`/api/super-admin/users/${id}`);
     const status = d.status || 'ACTIVE';
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="section-title">Profile</div>
       <div class="detail-grid">
-        ${detailRow('ID',             `<span class="mono">${d.id}</span>`)}
-        ${detailRow('Email',          d.email)}
-        ${detailRow('Name',           `${d.firstName||''} ${d.lastName||''}`.trim())}
-        ${detailRow('Phone',          d.phone)}
-        ${detailRow('Country',        d.country)}
-        ${detailRow('Role',           statusBadge(d.role))}
+        ${detailRow('ID', `<span class="mono">${esc(d.id)}</span>`)}
+        ${detailRow('Email', esc(d.email))}
+        ${detailRow('Name', esc(`${d.firstName || ''} ${d.lastName || ''}`.trim()))}
+        ${detailRow('Phone', esc(d.phone))}
+        ${detailRow('Country', esc(d.country))}
+        ${detailRow('Role', statusBadge(d.role))}
         ${detailRow('Account Status', statusBadge(status))}
         ${detailRow('Email Verified', d.emailVerified ? '✅ Yes' : '❌ No')}
-        ${detailRow('Created',        fmtDate(d.createdAt))}
+        ${detailRow('Created', fmtDate(d.createdAt))}
       </div>
       ${d.wallet ? `
         <div class="section-title">Wallet</div>
         <div class="detail-grid">
-          ${detailRow('Wallet ID',          `<span class="mono">${d.wallet.walletId}</span>`)}
-          ${detailRow('Balance',            `₵${fmt(d.wallet.balance)}`)}
-          ${detailRow('Currency',           d.wallet.currency)}
-          ${detailRow('Total Deposited',    `₵${fmt(d.wallet.totalDeposited)}`)}
-          ${detailRow('Total Withdrawn',    `₵${fmt(d.wallet.totalWithdrawn)}`)}
-          ${detailRow('Total Transactions', d.wallet.totalTransactions)}
+          ${detailRow('Wallet ID', `<span class="mono">${esc(d.wallet.walletId)}</span>`)}
+          ${detailRow('Balance', `₵${fmt(d.wallet.balance)}`)}
+          ${detailRow('Currency', esc(d.wallet.currency))}
+          ${detailRow('Total Deposited', `₵${fmt(d.wallet.totalDeposited)}`)}
+          ${detailRow('Total Withdrawn', `₵${fmt(d.wallet.totalWithdrawn)}`)}
+          ${detailRow('Total Transactions', fmtInt(d.wallet.totalTransactions))}
         </div>` : '<div class="alert alert-info" style="margin-top:12px">ℹ No wallet found for this user.</div>'}
       ${status === 'DISABLED' ? `
-        <div class="alert alert-warning" style="margin-top:14px">⚠ This account is currently deactivated. The user cannot log in.</div>` : ''}
+        <div class="alert alert-warning" style="margin-top:14px">⚠ This account is deactivated. The user cannot sign in.</div>` : ''}
       <div class="modal-footer">
-        <button class="btn-ghost btn-sm" onclick="viewUserDepositsModal('${id}', '${d.email||''}')">📥 Deposits</button>
-        <button class="btn-ghost btn-sm" onclick="viewUserTx('${id}')">Transactions</button>
-        <button class="btn-ghost btn-sm" onclick="viewUserWithdrawals('${id}', '${d.email||''}')">Withdrawals</button>
+        <button class="btn-ghost btn-sm" onclick="viewUserDepositsModal('${esc(id)}','${esc(d.email || '')}')">📥 Deposits</button>
+        <button class="btn-ghost btn-sm" onclick="viewUserTx('${esc(id)}','${esc(d.wallet ? d.wallet.walletId : '')}')">Transactions</button>
+        <button class="btn-ghost btn-sm" onclick="viewUserWithdrawals('${esc(id)}','${esc(d.email || '')}')">Withdrawals</button>
         ${d.role !== 'SUPER_ADMIN' ? (
           status === 'ACTIVE'
-            ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${id}','deactivate')">🚫 Deactivate Account</button>`
-            : `<button class="btn-success btn-sm" onclick="changeUserStatus('${id}','activate')">✓ Activate Account</button>`
+            ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${esc(id)}','deactivate')">🚫 Deactivate Account</button>`
+            : `<button class="btn-success btn-sm" onclick="changeUserStatus('${esc(id)}','activate')">✓ Activate Account</button>`
         ) : ''}
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
-// ── Activate / Deactivate user account ─────────────────────────────────────────
+// ── Activate / Deactivate user account ───────────────────────────────────────
 // Backed by SuperAdminUserManagementController:
 //   PATCH /api/v1/super-admin/users/{userId}/deactivate
 //   PATCH /api/v1/super-admin/users/{userId}/activate
@@ -493,41 +622,48 @@ async function viewUser(id) {
 async function changeUserStatus(userId, action) {
   const verb = action === 'deactivate' ? 'Deactivate' : 'Activate';
   const warn = action === 'deactivate'
-    ? ' The user will be immediately unable to log in.'
-    : ' The user will regain access to their account.';
+    ? ' They will be unable to sign in immediately.'
+    : ' They will regain access to their account.';
   if (!confirm(`${verb} this user's account?${warn}`)) return;
   try {
     const d = await api(`/api/v1/super-admin/users/${userId}/${action}`, 'PATCH');
-    showAlert(d.message || `Account ${action}d successfully.`, 'success');
+    showAlert(d.message || `Account ${action}d.`, 'success');
     if (currentPage === 'users') renderUsers(usersPage);
-    if (document.getElementById('modal-bg').classList.contains('open')) viewUser(userId);
+    if (modalIsOpen()) viewUser(userId);
   } catch (e) {
     showAlert('Error: ' + e.message, 'error');
   }
 }
 
 async function toggleUserAccountStatus(userId) {
-  if (!confirm("Toggle this user's account status (activate/deactivate)?")) return;
+  if (!confirm("Toggle this user's account status?")) return;
   try {
     const d = await api(`/api/v1/super-admin/users/${userId}/toggle-status`, 'PATCH');
     showAlert(d.message || `Status updated to ${d.status}.`, 'success');
     if (currentPage === 'users') renderUsers(usersPage);
-    if (document.getElementById('modal-bg').classList.contains('open')) viewUser(userId);
+    if (modalIsOpen()) viewUser(userId);
   } catch (e) {
     showAlert('Error: ' + e.message, 'error');
   }
 }
 
-async function viewUserTx(userId) {
+/** Jump to the transactions page pre-filtered by this user's wallet. */
+function viewUserTx(userId, walletId) {
   closeModal();
+  txWalletId = walletId || '';
   navigate('transactions');
-  txWalletId = '';
-  showAlert('Note: to filter by user, get their Wallet ID from the user detail and paste it in the Wallet ID filter.', 'info', 7000);
+  if (!walletId) {
+    showAlert('No wallet on file — open the user detail to copy a Wallet ID.', 'info', 7000);
+  } else {
+    setTimeout(() => renderTransactions(0), 0);
+  }
 }
 
 async function viewUserWithdrawals(userId, userEmail) {
   openModal(`Withdrawals — ${userEmail || userId}`, loading('Fetching withdrawal history…'));
   try {
+    // No server-side user filter on this endpoint yet, so page through and
+    // filter locally. Capped at 10 pages to avoid hammering the API.
     let allRows = [], p = 0, total = 1;
     while (p < total && p < 10) {
       const d = await api(`/api/wallet/withdrawals/admin/all?page=${p}&size=50`);
@@ -538,42 +674,42 @@ async function viewUserWithdrawals(userId, userEmail) {
     }
 
     const list = allRows.filter(w =>
-      (w.userId && w.userId === userId) ||
-      (w.user && w.user.id === userId)
-    );
+      (w.userId && w.userId === userId) || (w.user && w.user.id === userId));
+
+    cacheRows('withdrawals', list);
 
     if (!list.length) {
-      document.getElementById('modal-content').innerHTML = `
-        ${empty('No withdrawal requests found for this user.')}
-        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+      setModalContent(`
+        ${empty('No withdrawal requests for this user.')}
+        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`);
       return;
     }
 
-    const rows = list.map(w => `<tr>
-      ${labeledTd('Date',    `<span class="mono" style="font-size:12px">${fmtDate(w.createdAt)}</span>`)}
-      ${labeledTd('Amount',  `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
-      ${labeledTd('Method',  `<span class="badge badge-blue">${w.method||'—'}</span>`)}
-      ${labeledTd('Account', `<span class="mono" style="font-size:11px">${w.accountNumber||'—'}<br>${w.accountName||''}</span>`)}
-      ${labeledTd('Status',  statusBadge(w.status))}
-      ${labeledTd('', `<button class="btn-ghost btn-sm" onclick='viewWithdrawal(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Detail</button>`)}
-    </tr>`).join('');
+    const totalOut = list.reduce((s, w) => s + (Number(w.amount) || 0), 0);
 
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="alert alert-info" style="margin-bottom:14px">
-        ℹ Showing <strong>${list.length}</strong> withdrawal request${list.length!==1?'s':''} for this user.
+        ℹ <strong>${list.length}</strong> withdrawal request${list.length !== 1 ? 's' : ''} ·
+        total <strong style="color:var(--red-text)">₵${fmt(totalOut)}</strong>
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Date</th><th>Amount</th><th>Method</th><th>Account</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody>${list.map(w => `<tr>
+          ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(w.createdAt)}</span>`)}
+          ${labeledTd('Amount', `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
+          ${labeledTd('Method', `<span class="badge badge-blue">${esc(w.method) || '—'}</span>`)}
+          ${labeledTd('Account', `<span class="mono" style="font-size:11px">${esc(w.accountNumber) || '—'}<br>${esc(w.accountName) || ''}</span>`)}
+          ${labeledTd('Status', statusBadge(w.status))}
+          ${labeledTd('', `<button class="btn-ghost btn-sm" onclick="viewWithdrawal('${esc(w.id)}')">Detail</button>`)}
+        </tr>`).join('')}</tbody>
       </table></div>
       <div class="modal-footer">
-        <button class="btn-ghost btn-sm" onclick="navigate('withdrawals')">Open Full Withdrawals Page</button>
+        <button class="btn-ghost btn-sm" onclick="closeModal();navigate('withdrawals')">Open withdrawals page</button>
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `
-      <div class="alert alert-error">✕ ${e.message}</div>
-      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+    setModalContent(`${errorBox(e.message)}
+      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`);
   }
 }
 
@@ -584,45 +720,43 @@ async function viewUserDepositsModal(userId, userEmail) {
     const list = data.content || [];
 
     if (!list.length) {
-      document.getElementById('modal-content').innerHTML = `
-        ${empty('No deposits found for this user.')}
-        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+      setModalContent(`
+        ${empty('No deposits for this user.')}
+        <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`);
       return;
     }
 
-    const totalDeposited = list.reduce((sum, d) => sum + Number(d.amount), 0);
+    const totalDeposited = list.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
 
-    const rows = list.map(d => `<tr>
-      ${labeledTd('Date',         `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-      ${labeledTd('Amount',       `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
-      ${labeledTd('Balance After',`₵${fmt(d.balanceAfter)}`)}
-      ${labeledTd('Status',       statusBadge(d.status))}
-      ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncate(d.providerRef,22)}</span>`)}
-    </tr>`).join('');
-
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="alert alert-info" style="margin-bottom:14px">
-        ℹ <strong>${list.length}</strong> deposit${list.length!==1?'s':''} shown
-        ${data.totalElements > list.length ? `(${data.totalElements.toLocaleString()} total — open full page for all)` : ''}.
+        ℹ <strong>${list.length}</strong> deposit${list.length !== 1 ? 's' : ''} shown
+        ${data.totalElements > list.length ? `(${fmtInt(data.totalElements)} total — open the full page for all)` : ''}.
         Total shown: <strong style="color:var(--green-text)">₵${fmt(totalDeposited)}</strong>
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Date</th><th>Amount</th><th>Balance After</th><th>Status</th><th>Provider Ref</th></tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody>${list.map(d => `<tr>
+          ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('Amount', `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
+          ${labeledTd('Balance After', `₵${fmt(d.balanceAfter)}`)}
+          ${labeledTd('Status', statusBadge(d.status))}
+          ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncEsc(d.providerRef, 22)}</span>`)}
+        </tr>`).join('')}</tbody>
       </table></div>
       <div class="modal-footer">
-        <button class="btn-ghost btn-sm" onclick="closeModal();navigateToUserDeposits('${userId}','${userEmail}')">Open Full Deposit Page</button>
+        <button class="btn-ghost btn-sm"
+          onclick="closeModal();navigateToUserDeposits('${esc(userId)}','${esc(userEmail || '')}')">Open full deposit page</button>
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `
-      <div class="alert alert-error">✕ ${e.message}</div>
-      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`;
+    setModalContent(`${errorBox(e.message)}
+      <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`);
   }
 }
 
 function navigateToUserDeposits(userId, userEmail) {
-  udFilterUserId    = userId;
+  udFilterUserId = userId;
   udFilterUserEmail = userEmail;
   navigate('user-deposits');
 }
@@ -631,10 +765,23 @@ function navigateToUserDeposits(userId, userEmail) {
 // 4. TRANSACTIONS
 // ============================================================
 let txPage = 0, txKind = '', txStatus = '', txFrom = '', txTo = '', txWalletId = '';
-const TX_KINDS = ['DEPOSIT','WITHDRAW','WITHDRAW_HOLD','WITHDRAW_RELEASE','BET_STAKE','BET_WIN',
-  'REFERRAL_COMMISSION','PAYOUT','ADJUSTMENT','VIP_CASHBACK','VIP_MEMBERSHIP',
-  'WELCOME_BONUS','WITHDRAWAL_REFUND','ADMIN_UPGRADE_FEE'];
-const CREDIT_KINDS = new Set(['DEPOSIT','BET_WIN','REFERRAL_COMMISSION','WELCOME_BONUS','VIP_CASHBACK','WITHDRAW_RELEASE']);
+
+const TX_KINDS = ['DEPOSIT', 'WITHDRAW', 'WITHDRAW_HOLD', 'WITHDRAW_RELEASE', 'BET_STAKE', 'BET_WIN',
+  'REFERRAL_COMMISSION', 'PAYOUT', 'ADJUSTMENT', 'VIP_CASHBACK', 'VIP_MEMBERSHIP',
+  'WELCOME_BONUS', 'WITHDRAWAL_REFUND', 'ADMIN_UPGRADE_FEE'];
+
+const CREDIT_KINDS = new Set(['DEPOSIT', 'BET_WIN', 'REFERRAL_COMMISSION',
+  'WELCOME_BONUS', 'VIP_CASHBACK', 'WITHDRAW_RELEASE']);
+
+function txQuery(page, size) {
+  let q = `?page=${page}&size=${size}`;
+  if (txKind) q += `&kind=${encodeURIComponent(txKind)}`;
+  if (txStatus) q += `&status=${encodeURIComponent(txStatus)}`;
+  if (txFrom) q += `&from=${encodeURIComponent(txFrom)}`;
+  if (txTo) q += `&to=${encodeURIComponent(txTo)}`;
+  if (txWalletId) q += `&walletId=${encodeURIComponent(txWalletId)}`;
+  return q;
+}
 
 async function renderTransactions(page = 0) {
   txPage = page;
@@ -651,121 +798,130 @@ async function renderTransactions(page = 0) {
             <label>Kind</label>
             <select id="tx-kind" onchange="txKind=this.value">
               <option value="">All kinds</option>
-              ${TX_KINDS.map(k=>`<option value="${k}" ${txKind===k?'selected':''}>${k}</option>`).join('')}
+              ${TX_KINDS.map(k => `<option value="${k}" ${txKind === k ? 'selected' : ''}>${k}</option>`).join('')}
             </select>
           </div>
           <div class="form-group">
             <label>Status</label>
             <select id="tx-status" onchange="txStatus=this.value">
               <option value="">All</option>
-              <option value="COMPLETED" ${txStatus==='COMPLETED'?'selected':''}>COMPLETED</option>
-              <option value="PENDING"   ${txStatus==='PENDING'?'selected':''}>PENDING</option>
-              <option value="FAILED"    ${txStatus==='FAILED'?'selected':''}>FAILED</option>
+              <option value="COMPLETED" ${txStatus === 'COMPLETED' ? 'selected' : ''}>COMPLETED</option>
+              <option value="PENDING"   ${txStatus === 'PENDING' ? 'selected' : ''}>PENDING</option>
+              <option value="FAILED"    ${txStatus === 'FAILED' ? 'selected' : ''}>FAILED</option>
             </select>
           </div>
           <div class="form-group">
             <label>From</label>
-            <input id="tx-from" type="datetime-local" onchange="txFrom=this.value?new Date(this.value).toISOString():''">
+            <input id="tx-from" type="datetime-local"
+              onchange="txFrom=this.value?new Date(this.value).toISOString():''">
           </div>
           <div class="form-group">
             <label>To</label>
-            <input id="tx-to" type="datetime-local" onchange="txTo=this.value?new Date(this.value).toISOString():''">
+            <input id="tx-to" type="datetime-local"
+              onchange="txTo=this.value?new Date(this.value).toISOString():''">
           </div>
           <div class="form-group" style="flex:1;min-width:150px">
             <label>Wallet ID (UUID)</label>
-            <input id="tx-wallet" type="text" placeholder="Filter by wallet…" value="${txWalletId}" oninput="txWalletId=this.value">
+            <input id="tx-wallet" type="text" placeholder="Filter by wallet…"
+              value="${esc(txWalletId)}" oninput="txWalletId=this.value">
           </div>
           <div style="display:flex;gap:6px;align-self:flex-end">
             <button class="btn-primary" onclick="renderTransactions(0)">Filter</button>
-            <button class="btn-ghost"   onclick="txKind='';txStatus='';txFrom='';txTo='';txWalletId='';renderTransactions(0)">Clear</button>
+            <button class="btn-ghost"
+              onclick="txKind='';txStatus='';txFrom='';txTo='';txWalletId='';renderTransactions(0)">Clear</button>
           </div>
         </div>
         <div id="tx-list">${loading()}</div>
       </div>
     </div>`;
+
   try {
-    let q = `?page=${txPage}&size=50`;
-    if (txKind)     q += `&kind=${txKind}`;
-    if (txStatus)   q += `&status=${txStatus}`;
-    if (txFrom)     q += `&from=${txFrom}`;
-    if (txTo)       q += `&to=${txTo}`;
-    if (txWalletId) q += `&walletId=${encodeURIComponent(txWalletId)}`;
-    const data = await api(`/api/super-admin/transactions${q}`);
+    const data = await api(`/api/super-admin/transactions${txQuery(txPage, 50)}`);
     const list = data.content || [];
+    cacheRows('transactions', list);
+
     document.getElementById('tx-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Date</th><th>User Email</th><th>Kind</th><th>Amount</th><th>Balance After</th><th>Status</th><th>Provider Ref</th><th></th></tr></thead>
+        <thead><tr>
+          <th>Date</th><th>User Email</th><th>Kind</th><th>Amount</th>
+          <th>Balance After</th><th>Status</th><th>Provider Ref</th><th></th>
+        </tr></thead>
         <tbody>${list.map(t => `<tr>
-          ${labeledTd('Date',         `<span class="mono">${fmtDate(t.createdAt)}</span>`)}
-          ${labeledTd('User Email',   t.userEmail||'—')}
-          ${labeledTd('Kind',         kindBadge(t.kind))}
-          ${labeledTd('Amount',       `<strong style="color:${CREDIT_KINDS.has(t.kind)?'var(--green-text)':'var(--red-text)'}">₵${fmt(t.amount)}</strong>`)}
-          ${labeledTd('Balance After',`₵${fmt(t.balanceAfter)}`)}
-          ${labeledTd('Status',       statusBadge(t.status))}
-          ${labeledTd('Provider Ref', `<span class="mono">${truncate(t.providerRef,20)}</span>`)}
-          ${labeledTd('',             `<button class="btn-ghost btn-sm" onclick='viewTx(${JSON.stringify(t).replace(/'/g,"&#39;")})'>Detail</button>`)}
+          ${labeledTd('Date', `<span class="mono">${fmtDate(t.createdAt)}</span>`)}
+          ${labeledTd('User Email', esc(t.userEmail) || '—')}
+          ${labeledTd('Kind', kindBadge(t.kind))}
+          ${labeledTd('Amount', `<strong style="color:${CREDIT_KINDS.has(t.kind) ? 'var(--green-text)' : 'var(--red-text)'}">₵${fmt(t.amount)}</strong>`)}
+          ${labeledTd('Balance After', `₵${fmt(t.balanceAfter)}`)}
+          ${labeledTd('Status', statusBadge(t.status))}
+          ${labeledTd('Provider Ref', `<span class="mono">${truncEsc(t.providerRef, 20)}</span>`)}
+          ${labeledTd('', `<button class="btn-ghost btn-sm" onclick="viewTx('${esc(t.id)}')">Detail</button>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total transactions</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total transactions</span>
         ${paginator(txPage, data.totalPages, 'renderTransactions')}
-      </div>` : empty('No transactions match the filters.');
+      </div>` : empty('No transactions match those filters.');
   } catch (e) {
-    document.getElementById('tx-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('tx-list').innerHTML = errorBox(e.message);
   }
 }
 
-function viewTx(t) {
+function viewTx(id) {
+  const t = rowCache.transactions[id];
+  if (!t) { showAlert('That row is no longer loaded — refresh the page.', 'error'); return; }
   openModal('Transaction Detail', `
     <div class="section-title">Transaction</div>
     <div class="detail-grid">
-      ${detailRow('ID',            `<span class="mono">${t.id}</span>`)}
-      ${detailRow('Kind',          kindBadge(t.kind))}
-      ${detailRow('Status',        statusBadge(t.status))}
-      ${detailRow('Amount',        `₵${fmt(t.amount)}`)}
+      ${detailRow('ID', `<span class="mono">${esc(t.id)}</span>`)}
+      ${detailRow('Kind', kindBadge(t.kind))}
+      ${detailRow('Status', statusBadge(t.status))}
+      ${detailRow('Amount', `₵${fmt(t.amount)}`)}
       ${detailRow('Balance After', `₵${fmt(t.balanceAfter)}`)}
-      ${detailRow('User Email',    t.userEmail)}
-      ${detailRow('User ID',       `<span class="mono">${t.userId}</span>`)}
-      ${detailRow('Wallet ID',     `<span class="mono">${t.walletId}</span>`)}
-      ${detailRow('Provider Ref',  t.providerRef)}
-      ${detailRow('Date',          fmtDate(t.createdAt))}
+      ${detailRow('User Email', esc(t.userEmail))}
+      ${detailRow('User ID', `<span class="mono">${esc(t.userId)}</span>`)}
+      ${detailRow('Wallet ID', `<span class="mono">${esc(t.walletId)}</span>`)}
+      ${detailRow('Provider Ref', esc(t.providerRef))}
+      ${detailRow('Date', fmtDate(t.createdAt))}
     </div>
-    ${t.metadata ? `<div class="section-title">Metadata</div><pre class="json-pre">${JSON.stringify(t.metadata,null,2)}</pre>` : ''}
-    <div class="modal-footer"><button class="btn-ghost" onclick="closeModal()">Close</button></div>`);
+    ${t.metadata ? `<div class="section-title">Metadata</div>
+      <pre class="json-pre">${esc(JSON.stringify(t.metadata, null, 2))}</pre>` : ''}
+    <div class="modal-footer">
+      ${t.userId ? `<button class="btn-ghost btn-sm" onclick="closeModal();viewUser('${esc(t.userId)}')">View user</button>` : ''}
+      <button class="btn-ghost" onclick="closeModal()">Close</button>
+    </div>`);
 }
 
 async function exportTransactionsCSV() {
   const btn = document.querySelector('[onclick="exportTransactionsCSV()"]');
-  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
-    let rows=[], p=0, total=1;
+    let rows = [], p = 0, total = 1;
     while (p < total) {
-      let q = `?page=${p}&size=500`;
-      if (txKind)     q+=`&kind=${txKind}`;
-      if (txStatus)   q+=`&status=${txStatus}`;
-      if (txFrom)     q+=`&from=${txFrom}`;
-      if (txTo)       q+=`&to=${txTo}`;
-      if (txWalletId) q+=`&walletId=${encodeURIComponent(txWalletId)}`;
-      const d = await api(`/api/super-admin/transactions${q}`);
-      rows = rows.concat(d.content||[]);
-      total = d.totalPages||1;
+      const d = await api(`/api/super-admin/transactions${txQuery(p, 500)}`);
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.','error'); return; }
-    const headers = ['ID','User Email','User ID','Wallet ID','Kind','Amount (GHS)','Balance After','Status','Provider Ref','Date'];
-    exportCSV(`transactions-${new Date().toISOString().slice(0,10)}.csv`, headers,
-      rows.map(t=>[t.id,t.userEmail,t.userId,t.walletId,t.kind,t.amount,t.balanceAfter,t.status,t.providerRef||'',t.createdAt]));
-    showAlert(`Exported ${rows.length} rows!`, 'success');
-  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
-  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    exportCSV(`transactions-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'User Email', 'User ID', 'Wallet ID', 'Kind', 'Amount (GHS)',
+        'Balance After', 'Status', 'Provider Ref', 'Date'],
+      rows.map(t => [t.id, t.userEmail, t.userId, t.walletId, t.kind,
+        t.amount, t.balanceAfter, t.status, t.providerRef || '', t.createdAt]));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
-// 5. BINANCE/CRYPTO DEPOSITS
+// 5. BINANCE / CRYPTO DEPOSITS
 // ============================================================
-let binancePage=0, binanceTab='all';
+let binancePage = 0, binanceTab = 'all';
 
-async function renderBinance(page=0) {
+async function renderBinance(page = 0) {
   binancePage = page;
   const c = document.getElementById('page-content');
   c.innerHTML = `
@@ -776,44 +932,51 @@ async function renderBinance(page=0) {
       </div>
       <div class="card-body">
         <div class="tabs">
-          <button class="tab ${binanceTab==='all'?'active':''}"     onclick="binanceTab='all';renderBinance(0)">All Deposits</button>
-          <button class="tab ${binanceTab==='pending'?'active':''}" onclick="binanceTab='pending';renderBinance(0)">⏳ Pending Review</button>
+          <button class="tab ${binanceTab === 'all' ? 'active' : ''}"
+            onclick="binanceTab='all';renderBinance(0)">All Deposits</button>
+          <button class="tab ${binanceTab === 'pending' ? 'active' : ''}"
+            onclick="binanceTab='pending';renderBinance(0)">⏳ Pending Review</button>
         </div>
         <div id="binance-list">${loading()}</div>
       </div>
     </div>`;
+
   try {
-    const ep = binanceTab==='pending'
+    const ep = binanceTab === 'pending'
       ? `/api/admin/binance-deposits/pending?page=${page}&size=20`
       : `/api/admin/binance-deposits?page=${page}&size=20`;
     const data = await api(ep);
     const list = data.content || [];
+
     document.getElementById('binance-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Date</th><th>User ID</th><th>Coin/Network</th><th>Crypto Amt</th><th>Expected GHS</th><th>Credited GHS</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr>
+          <th>Date</th><th>User ID</th><th>Coin/Network</th><th>Crypto Amt</th>
+          <th>Expected GHS</th><th>Credited GHS</th><th>Status</th><th>Actions</th>
+        </tr></thead>
         <tbody>${list.map(d => `<tr>
-          ${labeledTd('Date',         `<span class="mono">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('User ID',      `<span class="mono">${truncate(d.userId,14)}</span>`)}
-          ${labeledTd('Coin/Network', `<span class="badge badge-yellow">${d.coin}/${d.network}</span>`)}
-          ${labeledTd('Crypto Amt',   d.cryptoAmount)}
+          ${labeledTd('Date', `<span class="mono">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('User ID', `<span class="mono">${truncEsc(d.userId, 14)}</span>`)}
+          ${labeledTd('Coin/Network', `<span class="badge badge-yellow">${esc(d.coin)}/${esc(d.network)}</span>`)}
+          ${labeledTd('Crypto Amt', esc(d.cryptoAmount))}
           ${labeledTd('Expected GHS', `₵${fmt(d.expectedGhsAmount)}`)}
-          ${labeledTd('Credited GHS', d.creditedGhsAmount!=null ? `₵${fmt(d.creditedGhsAmount)}` : '—')}
-          ${labeledTd('Status',       statusBadge(d.status))}
+          ${labeledTd('Credited GHS', d.creditedGhsAmount != null ? `₵${fmt(d.creditedGhsAmount)}` : '—')}
+          ${labeledTd('Status', statusBadge(d.status))}
           ${labeledTd('Actions', `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick="viewBinanceDeposit('${d.id}')">View</button>
-            ${d.status==='PENDING'
-              ? `<button class="btn-success btn-sm" onclick="openApproveDeposit('${d.id}',${d.expectedGhsAmount})">Approve</button>
-                 <button class="btn-danger btn-sm"  onclick="openRejectDeposit('${d.id}')">Reject</button>`
+            <button class="btn-ghost btn-sm" onclick="viewBinanceDeposit('${esc(d.id)}')">View</button>
+            ${d.status === 'PENDING'
+              ? `<button class="btn-success btn-sm" onclick="openApproveDeposit('${esc(d.id)}',${Number(d.expectedGhsAmount) || 0})">Approve</button>
+                 <button class="btn-danger btn-sm" onclick="openRejectDeposit('${esc(d.id)}')">Reject</button>`
               : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total</span>
         ${paginator(binancePage, data.totalPages, 'renderBinance')}
-      </div>` : empty('No deposits found.');
+      </div>` : empty(binanceTab === 'pending' ? 'Nothing awaiting review.' : 'No crypto deposits yet.');
   } catch (e) {
-    document.getElementById('binance-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('binance-list').innerHTML = errorBox(e.message);
   }
 }
 
@@ -821,48 +984,48 @@ async function viewBinanceDeposit(id) {
   openModal('Crypto Deposit Detail', loading());
   try {
     const d = await api(`/api/admin/binance-deposits/${id}`);
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="section-title">Deposit Info</div>
       <div class="detail-grid">
-        ${detailRow('ID',                  `<span class="mono">${d.id}</span>`)}
-        ${detailRow('Status',              statusBadge(d.status))}
-        ${detailRow('Coin',                d.coin)}
-        ${detailRow('Network',             d.network)}
-        ${detailRow('Crypto Amount',       d.cryptoAmount)}
-        ${detailRow('Expected GHS',        `₵${fmt(d.expectedGhsAmount)}`)}
-        ${detailRow('Credited GHS',        d.creditedGhsAmount!=null ? `₵${fmt(d.creditedGhsAmount)}` : '—')}
-        ${detailRow('TXID',                `<span class="mono">${d.txid||'—'}</span>`)}
-        ${detailRow('Sender Address',      `<span class="mono" style="font-size:11px">${d.senderAddress||'—'}</span>`)}
-        ${detailRow('User Note',           d.userNote)}
-        ${detailRow('Admin Note',          d.adminNote)}
-        ${detailRow('Reviewed By',         d.reviewedBy ? `<span class="mono">${d.reviewedBy}</span>` : '—')}
-        ${detailRow('Reviewed At',         fmtDate(d.reviewedAt))}
-        ${detailRow('Wallet Tx ID',        d.walletTransactionId ? `<span class="mono">${d.walletTransactionId}</span>` : '—')}
-        ${detailRow('User ID',             `<span class="mono">${d.userId}</span>`)}
-        ${detailRow('Created',             fmtDate(d.createdAt))}
-        ${detailRow('Updated',             fmtDate(d.updatedAt))}
+        ${detailRow('ID', `<span class="mono">${esc(d.id)}</span>`)}
+        ${detailRow('Status', statusBadge(d.status))}
+        ${detailRow('Coin', esc(d.coin))}
+        ${detailRow('Network', esc(d.network))}
+        ${detailRow('Crypto Amount', esc(d.cryptoAmount))}
+        ${detailRow('Expected GHS', `₵${fmt(d.expectedGhsAmount)}`)}
+        ${detailRow('Credited GHS', d.creditedGhsAmount != null ? `₵${fmt(d.creditedGhsAmount)}` : '—')}
+        ${detailRow('TXID', `<span class="mono">${esc(d.txid) || '—'}</span>`)}
+        ${detailRow('Sender Address', `<span class="mono" style="font-size:11px">${esc(d.senderAddress) || '—'}</span>`)}
+        ${detailRow('User Note', esc(d.userNote))}
+        ${detailRow('Admin Note', esc(d.adminNote))}
+        ${detailRow('Reviewed By', d.reviewedBy ? `<span class="mono">${esc(d.reviewedBy)}</span>` : '—')}
+        ${detailRow('Reviewed At', fmtDate(d.reviewedAt))}
+        ${detailRow('Wallet Tx ID', d.walletTransactionId ? `<span class="mono">${esc(d.walletTransactionId)}</span>` : '—')}
+        ${detailRow('User ID', `<span class="mono">${esc(d.userId)}</span>`)}
+        ${detailRow('Created', fmtDate(d.createdAt))}
+        ${detailRow('Updated', fmtDate(d.updatedAt))}
       </div>
       ${d.screenshotUrl ? `
         <div class="section-title">Payment Screenshot</div>
-        <img class="screenshot-img" src="${d.screenshotUrl}"
-             onclick="window.open('${d.screenshotUrl}','_blank')" alt="Payment proof">` : ''}
+        <img class="screenshot-img" src="${encodeURI(d.screenshotUrl)}"
+             onclick="window.open('${encodeURI(d.screenshotUrl)}','_blank')" alt="Payment proof">` : ''}
       <div class="modal-footer">
-        ${d.status==='PENDING' ? `
-          <button class="btn-success" onclick="closeModal();openApproveDeposit('${d.id}',${d.expectedGhsAmount})">Approve</button>
-          <button class="btn-danger"  onclick="closeModal();openRejectDeposit('${d.id}')">Reject</button>` : ''}
+        ${d.status === 'PENDING' ? `
+          <button class="btn-success" onclick="closeModal();openApproveDeposit('${esc(d.id)}',${Number(d.expectedGhsAmount) || 0})">Approve</button>
+          <button class="btn-danger" onclick="closeModal();openRejectDeposit('${esc(d.id)}')">Reject</button>` : ''}
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
 function openApproveDeposit(id, expectedGhs) {
   openModal('Approve Deposit', `
-    <div class="alert alert-info">ℹ The user's GHS wallet will be credited immediately on approval.</div>
+    <div class="alert alert-info">ℹ The user's GHS wallet is credited immediately on approval.</div>
     <div class="form-group" style="margin-bottom:12px">
-      <label>GHS Amount to Credit * (adjust from expected if rate differs)</label>
-      <input id="appr-amt" type="number" step="0.01" min="0.01" value="${expectedGhs}">
+      <label>GHS Amount to Credit * (adjust if the rate differs)</label>
+      <input id="appr-amt" type="number" step="0.01" min="0.01" value="${Number(expectedGhs) || 0}">
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Admin Note (optional)</label>
@@ -871,98 +1034,102 @@ function openApproveDeposit(id, expectedGhs) {
     <div id="appr-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-success" id="appr-btn" onclick="approveDeposit('${id}')">✓ Confirm Approve</button>
+      <button class="btn-success" id="appr-btn" onclick="approveDeposit('${esc(id)}')">✓ Confirm Approve</button>
     </div>`);
 }
 
 async function approveDeposit(id) {
   const creditedGhsAmount = parseFloat(document.getElementById('appr-amt').value);
-  const adminNote         = document.getElementById('appr-note').value.trim();
+  const adminNote = document.getElementById('appr-note').value.trim();
   if (!creditedGhsAmount || creditedGhsAmount <= 0) {
-    document.getElementById('appr-msg').innerHTML = '<div class="alert alert-error">✕ Enter a valid GHS amount.</div>';
+    document.getElementById('appr-msg').innerHTML = errorBox('Enter a valid GHS amount.');
     return;
   }
   const btn = document.getElementById('appr-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Approving…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Approving…';
   try {
     await api(`/api/admin/binance-deposits/${id}/approve`, 'POST', { creditedGhsAmount, adminNote });
     closeModal();
-    showAlert(`Deposit approved! ₵${fmt(creditedGhsAmount)} credited to user wallet.`, 'success');
+    showAlert(`Approved. ₵${fmt(creditedGhsAmount)} credited to the user's wallet.`, 'success');
     renderBinance(binancePage);
   } catch (e) {
-    document.getElementById('appr-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='✓ Confirm Approve';
+    document.getElementById('appr-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = '✓ Confirm Approve';
   }
 }
 
 function openRejectDeposit(id) {
   openModal('Reject Deposit', `
-    <div class="alert alert-warning">⚠ The user's wallet will NOT be credited. This note will be visible to the user.</div>
+    <div class="alert alert-warning">⚠ The wallet is not credited. This note is visible to the user.</div>
     <div class="form-group" style="margin-bottom:12px;margin-top:4px">
-      <label>Admin Note / Rejection Reason * (max 1000 chars)</label>
+      <label>Rejection Reason * (max 1000 chars)</label>
       <textarea id="rej-note" maxlength="1000" placeholder="TXID not found on TRC20 network after 24h."></textarea>
     </div>
     <div id="rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="rej-btn" onclick="rejectDeposit('${id}')">✕ Confirm Reject</button>
+      <button class="btn-danger" id="rej-btn" onclick="rejectDeposit('${esc(id)}')">✕ Confirm Reject</button>
     </div>`);
 }
 
 async function rejectDeposit(id) {
   const adminNote = document.getElementById('rej-note').value.trim();
   if (!adminNote) {
-    document.getElementById('rej-msg').innerHTML = '<div class="alert alert-error">✕ Rejection reason is required.</div>';
+    document.getElementById('rej-msg').innerHTML = errorBox('A rejection reason is required.');
     return;
   }
   const btn = document.getElementById('rej-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Rejecting…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
     await api(`/api/admin/binance-deposits/${id}/reject`, 'POST', { adminNote });
     closeModal();
     showAlert('Deposit rejected.', 'success');
     renderBinance(binancePage);
   } catch (e) {
-    document.getElementById('rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='✕ Confirm Reject';
+    document.getElementById('rej-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = '✕ Confirm Reject';
   }
 }
 
 async function exportBinanceCSV() {
   const btn = document.querySelector('[onclick="exportBinanceCSV()"]');
-  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
-    let rows=[], p=0, total=1;
+    let rows = [], p = 0, total = 1;
     while (p < total) {
-      const ep = binanceTab==='pending'
+      const ep = binanceTab === 'pending'
         ? `/api/admin/binance-deposits/pending?page=${p}&size=100`
         : `/api/admin/binance-deposits?page=${p}&size=100`;
       const d = await api(ep);
-      rows = rows.concat(d.content||[]);
-      total = d.totalPages||1;
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.','error'); return; }
-    const headers=['ID','User ID','TXID','Coin','Network','Crypto Amount','Expected GHS','Credited GHS',
-      'Status','Sender Address','User Note','Admin Note','Reviewed By','Reviewed At',
-      'Wallet Tx ID','Created At','Updated At'];
-    exportCSV(`binance-deposits-${new Date().toISOString().slice(0,10)}.csv`, headers,
-      rows.map(d=>[d.id,d.userId,d.txid,d.coin,d.network,d.cryptoAmount,d.expectedGhsAmount,
-        d.creditedGhsAmount??'',d.status,d.senderAddress??'',d.userNote??'',d.adminNote??'',
-        d.reviewedBy??'',d.reviewedAt??'',d.walletTransactionId??'',d.createdAt,d.updatedAt??'']));
-    showAlert(`Exported ${rows.length} deposits to CSV!`, 'success');
-  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
-  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    exportCSV(`binance-deposits-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'User ID', 'TXID', 'Coin', 'Network', 'Crypto Amount', 'Expected GHS', 'Credited GHS',
+        'Status', 'Sender Address', 'User Note', 'Admin Note', 'Reviewed By', 'Reviewed At',
+        'Wallet Tx ID', 'Created At', 'Updated At'],
+      rows.map(d => [d.id, d.userId, d.txid, d.coin, d.network, d.cryptoAmount,
+        d.expectedGhsAmount, d.creditedGhsAmount ?? '', d.status, d.senderAddress ?? '',
+        d.userNote ?? '', d.adminNote ?? '', d.reviewedBy ?? '', d.reviewedAt ?? '',
+        d.walletTransactionId ?? '', d.createdAt, d.updatedAt ?? '']));
+    showAlert(`Exported ${rows.length} deposits.`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
 // 6. BANK TRANSFER & MOMO DEPOSITS
 // ============================================================
-// Tab options:
-//   'all'     – all bank/momo deposits, newest first
-//   'momo'    – only deposits with ngnAmountSent < 30000 (MoMo / GHS ₵)
-//   'bank'    – only deposits with ngnAmountSent >= 30000 (NGN bank transfer ₦)
-//   'pending' – all PENDING deposits, newest first
+// Tabs:
+//   'all'     – everything, newest first
+//   'momo'    – ngnAmountSent < 30000 (GHS ₵)
+//   'bank'    – ngnAmountSent >= 30000 (NGN ₦)
+//   'pending' – awaiting review
 // ─────────────────────────────────────────────────────────────
 let bankDepositPage = 0, bankDepositTab = 'all';
 
@@ -977,18 +1144,17 @@ async function renderBankDeposits(page = 0) {
       </div>
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:14px">
-          ℹ <strong>MoMo deposits</strong> (amount &lt; ₵30,000) are shown in cedis (₵).
-          <strong>Bank transfers</strong> (amount ≥ 30,000) are shown in naira (₦).
-          All lists are sorted newest first.
+          ℹ <strong>MoMo</strong> (under ₵30,000) shows in cedis. <strong>Bank transfers</strong>
+          (30,000 and above) show in naira. Newest first.
         </div>
         <div class="tabs">
-          <button class="tab ${bankDepositTab==='all'?'active':''}"
+          <button class="tab ${bankDepositTab === 'all' ? 'active' : ''}"
             onclick="bankDepositTab='all';renderBankDeposits(0)">All Deposits</button>
-          <button class="tab ${bankDepositTab==='momo'?'active':''}"
+          <button class="tab ${bankDepositTab === 'momo' ? 'active' : ''}"
             onclick="bankDepositTab='momo';renderBankDeposits(0)">📱 MoMo (₵)</button>
-          <button class="tab ${bankDepositTab==='bank'?'active':''}"
+          <button class="tab ${bankDepositTab === 'bank' ? 'active' : ''}"
             onclick="bankDepositTab='bank';renderBankDeposits(0)">🏦 Bank Transfer (₦)</button>
-          <button class="tab ${bankDepositTab==='pending'?'active':''}"
+          <button class="tab ${bankDepositTab === 'pending' ? 'active' : ''}"
             onclick="bankDepositTab='pending';renderBankDeposits(0)">⏳ Pending Review</button>
         </div>
         <div id="bank-deposit-list">${loading()}</div>
@@ -996,7 +1162,6 @@ async function renderBankDeposits(page = 0) {
     </div>`;
 
   try {
-    // Determine API endpoint — pending tab has its own route
     const isPendingTab = bankDepositTab === 'pending';
     const ep = isPendingTab
       ? `/api/admin/bank-deposits/pending?page=${page}&size=50&sort=createdAt,desc`
@@ -1004,24 +1169,17 @@ async function renderBankDeposits(page = 0) {
 
     const data = await api(ep);
 
-    // Sort newest first client-side (safety net in case API ignores sort param)
-    let list = (data.content || []).sort((a, b) =>
-      new Date(b.createdAt) - new Date(a.createdAt)
-    );
+    // Safety net in case the API ignores the sort param.
+    let list = (data.content || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-    // Client-side filter for momo / bank tabs
-    if (bankDepositTab === 'momo') {
-      list = list.filter(d => isMomo(d.ngnAmountSent));
-    } else if (bankDepositTab === 'bank') {
-      list = list.filter(d => !isMomo(d.ngnAmountSent));
-    }
+    if (bankDepositTab === 'momo') list = list.filter(d => isMomo(d.ngnAmountSent));
+    else if (bankDepositTab === 'bank') list = list.filter(d => !isMomo(d.ngnAmountSent));
 
-    // Tab-specific empty messages
     const emptyMsgs = {
-      all:     'No deposit submissions found.',
-      momo:    'No MoMo deposit submissions found.',
-      bank:    'No bank transfer deposit submissions found.',
-      pending: 'No pending deposit submissions found.'
+      all: 'No deposit submissions yet.',
+      momo: 'No MoMo submissions on this page.',
+      bank: 'No bank transfer submissions on this page.',
+      pending: 'Nothing awaiting review.'
     };
 
     document.getElementById('bank-deposit-list').innerHTML = list.length ? `
@@ -1032,199 +1190,164 @@ async function renderBankDeposits(page = 0) {
           <th>Sender Name</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody>${list.map(d => {
-          const sym    = depositSymbol(d.ngnAmountSent);
+          const sym = depositSymbol(d.ngnAmountSent);
           const typeBadge = isMomo(d.ngnAmountSent)
             ? `<span class="badge badge-green">📱 MoMo</span>`
             : `<span class="badge badge-blue">🏦 Bank</span>`;
           return `<tr>
-            ${labeledTd('Date',            `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-            ${labeledTd('Type',            typeBadge)}
-            ${labeledTd('User ID',         `<span class="mono">${truncate(d.userId, 14)}</span>`)}
-            ${labeledTd('Transfer Ref',    `<span class="mono" style="font-size:12px">${truncate(d.transferReference, 20)}</span>`)}
-            ${labeledTd('Sent',            `<strong>${sym}${fmt(d.ngnAmountSent)}</strong>`)}
+            ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+            ${labeledTd('Type', typeBadge)}
+            ${labeledTd('User ID', `<span class="mono">${truncEsc(d.userId, 14)}</span>`)}
+            ${labeledTd('Transfer Ref', `<span class="mono" style="font-size:12px">${truncEsc(d.transferReference, 20)}</span>`)}
+            ${labeledTd('Sent', `<strong>${sym}${fmt(d.ngnAmountSent)}</strong>`)}
             ${labeledTd('Expected Credit', `${sym}${fmt(d.expectedNgnCredit)}`)}
-            ${labeledTd('Credited',        d.creditedNgnAmount != null
+            ${labeledTd('Credited', d.creditedNgnAmount != null
               ? `<strong style="color:var(--green-text)">${sym}${fmt(d.creditedNgnAmount)}</strong>` : '—')}
-            ${labeledTd('Sender Name',     d.senderAccountName || '—')}
-            ${labeledTd('Status',          statusBadge(d.status))}
+            ${labeledTd('Sender Name', esc(d.senderAccountName) || '—')}
+            ${labeledTd('Status', statusBadge(d.status))}
             ${labeledTd('Actions', `<div class="btn-row">
-              <button class="btn-ghost btn-sm" onclick="viewBankDeposit('${d.id}')">View</button>
+              <button class="btn-ghost btn-sm" onclick="viewBankDeposit('${esc(d.id)}')">View</button>
               ${d.status === 'PENDING' ? `
-                <button class="btn-success btn-sm" onclick="openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit}, ${d.ngnAmountSent})">Approve</button>
-                <button class="btn-danger btn-sm"  onclick="openRejectBankDeposit('${d.id}')">Reject</button>` : ''}
+                <button class="btn-success btn-sm" onclick="openApproveBankDeposit('${esc(d.id)}',${Number(d.expectedNgnCredit) || 0},${Number(d.ngnAmountSent) || 0})">Approve</button>
+                <button class="btn-danger btn-sm" onclick="openRejectBankDeposit('${esc(d.id)}')">Reject</button>` : ''}
             </div>`)}
           </tr>`;
         }).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total</span>
         ${paginator(bankDepositPage, data.totalPages, 'renderBankDeposits')}
       </div>` : empty(emptyMsgs[bankDepositTab] || 'No records found.');
   } catch (e) {
-    document.getElementById('bank-deposit-list').innerHTML =
-      `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('bank-deposit-list').innerHTML = errorBox(e.message);
   }
 }
 
-// ── View full detail for one bank/momo deposit ────────────────────────────────
 async function viewBankDeposit(id) {
   openModal('Deposit Detail', loading());
   try {
-    const d   = await api(`/api/admin/bank-deposits/${id}`);
+    const d = await api(`/api/admin/bank-deposits/${id}`);
     const sym = depositSymbol(d.ngnAmountSent);
     const typeBadge = isMomo(d.ngnAmountSent)
       ? `<span class="badge badge-green">📱 MoMo Deposit (₵ GHS)</span>`
       : `<span class="badge badge-blue">🏦 Bank Transfer (₦ NGN)</span>`;
 
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="section-title">Deposit Info</div>
       <div class="detail-grid">
-        ${detailRow('ID',                    `<span class="mono">${d.id}</span>`)}
-        ${detailRow('Type',                  typeBadge)}
-        ${detailRow('Status',                statusBadge(d.status))}
-        ${detailRow('Transfer Reference',    `<span class="mono">${d.transferReference || '—'}</span>`)}
-        ${detailRow('Amount Sent',           `${sym}${fmt(d.ngnAmountSent)}`)}
-        ${detailRow('Expected Credit',       `${sym}${fmt(d.expectedNgnCredit)}`)}
-        ${detailRow('Credited Amount',       d.creditedNgnAmount != null
-            ? `<strong style="color:var(--green-text)">${sym}${fmt(d.creditedNgnAmount)}</strong>`
-            : '—')}
-        ${detailRow('Sender Account Name',   d.senderAccountName || '—')}
-        ${detailRow('User Note',             d.userNote || '—')}
-        ${detailRow('Admin Note',            d.adminNote || '—')}
-        ${detailRow('Reviewed By',           d.reviewedBy
-            ? `<span class="mono">${d.reviewedBy}</span>` : '—')}
-        ${detailRow('Reviewed At',           fmtDate(d.reviewedAt))}
-        ${detailRow('Wallet Tx ID',          d.walletTransactionId
-            ? `<span class="mono">${d.walletTransactionId}</span>` : '—')}
-        ${detailRow('User ID',               `<span class="mono">${d.userId}</span>`)}
-        ${detailRow('Created',               fmtDate(d.createdAt))}
-        ${detailRow('Updated',               fmtDate(d.updatedAt))}
+        ${detailRow('ID', `<span class="mono">${esc(d.id)}</span>`)}
+        ${detailRow('Type', typeBadge)}
+        ${detailRow('Status', statusBadge(d.status))}
+        ${detailRow('Transfer Reference', `<span class="mono">${esc(d.transferReference) || '—'}</span>`)}
+        ${detailRow('Amount Sent', `${sym}${fmt(d.ngnAmountSent)}`)}
+        ${detailRow('Expected Credit', `${sym}${fmt(d.expectedNgnCredit)}`)}
+        ${detailRow('Credited Amount', d.creditedNgnAmount != null
+          ? `<strong style="color:var(--green-text)">${sym}${fmt(d.creditedNgnAmount)}</strong>` : '—')}
+        ${detailRow('Sender Account Name', esc(d.senderAccountName) || '—')}
+        ${detailRow('User Note', esc(d.userNote) || '—')}
+        ${detailRow('Admin Note', esc(d.adminNote) || '—')}
+        ${detailRow('Reviewed By', d.reviewedBy ? `<span class="mono">${esc(d.reviewedBy)}</span>` : '—')}
+        ${detailRow('Reviewed At', fmtDate(d.reviewedAt))}
+        ${detailRow('Wallet Tx ID', d.walletTransactionId ? `<span class="mono">${esc(d.walletTransactionId)}</span>` : '—')}
+        ${detailRow('User ID', `<span class="mono">${esc(d.userId)}</span>`)}
+        ${detailRow('Created', fmtDate(d.createdAt))}
+        ${detailRow('Updated', fmtDate(d.updatedAt))}
       </div>
 
       ${d.screenshotUrl ? `
         <div class="section-title">Payment Screenshot / Proof</div>
         <div style="text-align:center;margin-bottom:10px">
-          <img class="screenshot-img"
-               src="${d.screenshotUrl}"
-               onclick="window.open('${d.screenshotUrl}','_blank')"
-               alt="Payment proof"
-               style="max-width:100%;border-radius:8px;cursor:zoom-in">
-          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
-            Click image to open full size
-          </div>
+          <img class="screenshot-img" src="${encodeURI(d.screenshotUrl)}"
+               onclick="window.open('${encodeURI(d.screenshotUrl)}','_blank')"
+               alt="Payment proof" style="max-width:100%;border-radius:8px;cursor:zoom-in">
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px">Click to open full size</div>
         </div>` : `
-        <div class="alert alert-warning" style="margin-top:12px">
-          ⚠ No screenshot was provided by the user.
-        </div>`}
+        <div class="alert alert-warning" style="margin-top:12px">⚠ No screenshot was provided.</div>`}
 
       <div class="modal-footer">
         ${d.status === 'PENDING' ? `
           <button class="btn-success"
-            onclick="closeModal();openApproveBankDeposit('${d.id}', ${d.expectedNgnCredit}, ${d.ngnAmountSent})">
-            ✓ Approve
-          </button>
-          <button class="btn-danger"
-            onclick="closeModal();openRejectBankDeposit('${d.id}')">
-            ✕ Reject
-          </button>` : ''}
+            onclick="closeModal();openApproveBankDeposit('${esc(d.id)}',${Number(d.expectedNgnCredit) || 0},${Number(d.ngnAmountSent) || 0})">✓ Approve</button>
+          <button class="btn-danger" onclick="closeModal();openRejectBankDeposit('${esc(d.id)}')">✕ Reject</button>` : ''}
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML =
-      `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
-// ── Approve modal ─────────────────────────────────────────────────────────────
 function openApproveBankDeposit(id, expectedNgn, ngnAmountSent) {
-  const sym      = depositSymbol(ngnAmountSent != null ? ngnAmountSent : expectedNgn);
-  const isMomoTx = isMomo(ngnAmountSent != null ? ngnAmountSent : expectedNgn);
+  const basis = ngnAmountSent != null ? ngnAmountSent : expectedNgn;
+  const sym = depositSymbol(basis);
+  const isMomoTx = isMomo(basis);
   openModal(`Approve ${isMomoTx ? 'MoMo' : 'Bank Transfer'} Deposit`, `
     <div class="alert alert-info" style="margin-bottom:14px">
-      ℹ The user's wallet will be credited immediately on approval.
-      ${isMomoTx
-        ? 'Verify the MoMo transaction reference and screenshot before proceeding.'
-        : 'Verify the bank transfer reference and screenshot before proceeding.'}
+      ℹ The wallet is credited immediately on approval.
+      ${isMomoTx ? 'Check the MoMo reference and screenshot first.' : 'Check the transfer reference and screenshot first.'}
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Amount to Credit * <span style="color:var(--text-dim);font-size:12px">
-        (adjust if actual received differs from expected)</span></label>
+        (adjust if the received amount differs)</span></label>
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:18px;font-weight:600">${sym}</span>
-        <input id="bd-appr-amt" type="number" step="0.01" min="0.01" value="${expectedNgn}" style="flex:1">
+        <input id="bd-appr-amt" type="number" step="0.01" min="0.01" value="${Number(expectedNgn) || 0}" style="flex:1">
       </div>
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Admin Note (optional)</label>
-      <textarea id="bd-appr-note"
-        placeholder="${isMomoTx ? 'MoMo transaction confirmed. Ref matches.' : 'Transfer confirmed via bank statement. Ref matches.'}"></textarea>
+      <textarea id="bd-appr-note" placeholder="${isMomoTx ? 'MoMo transaction confirmed. Ref matches.' : 'Confirmed against bank statement. Ref matches.'}"></textarea>
     </div>
     <div id="bd-appr-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn-success" id="bd-appr-btn"
-        onclick="approveBankDeposit('${id}', '${sym}')">✓ Confirm Approve</button>
+        onclick="approveBankDeposit('${esc(id)}','${sym}')">✓ Confirm Approve</button>
     </div>`);
 }
 
 async function approveBankDeposit(id, sym) {
   const creditedNgnAmount = parseFloat(document.getElementById('bd-appr-amt').value);
-  const adminNote         = document.getElementById('bd-appr-note').value.trim();
-
+  const adminNote = document.getElementById('bd-appr-note').value.trim();
   if (!creditedNgnAmount || creditedNgnAmount <= 0) {
-    document.getElementById('bd-appr-msg').innerHTML =
-      '<div class="alert alert-error">✕ Enter a valid amount to credit.</div>';
+    document.getElementById('bd-appr-msg').innerHTML = errorBox('Enter a valid amount to credit.');
     return;
   }
-
   const btn = document.getElementById('bd-appr-btn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Approving…';
   try {
-    await api(`/api/admin/bank-deposits/${id}/approve`, 'POST', {
-      creditedNgnAmount,
-      adminNote
-    });
+    await api(`/api/admin/bank-deposits/${id}/approve`, 'POST', { creditedNgnAmount, adminNote });
     closeModal();
-    showAlert(
-      `Deposit approved! ${sym}${fmt(creditedNgnAmount)} credited to user wallet.`,
-      'success'
-    );
+    showAlert(`Approved. ${sym}${fmt(creditedNgnAmount)} credited to the user's wallet.`, 'success');
     renderBankDeposits(bankDepositPage);
   } catch (e) {
-    document.getElementById('bd-appr-msg').innerHTML =
-      `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('bd-appr-msg').innerHTML = errorBox(e.message);
     btn.disabled = false; btn.innerHTML = '✓ Confirm Approve';
   }
 }
 
-// ── Reject modal ──────────────────────────────────────────────────────────────
 function openRejectBankDeposit(id) {
   openModal('Reject Deposit', `
     <div class="alert alert-warning" style="margin-bottom:14px">
-      ⚠ The user's wallet will <strong>NOT</strong> be credited.
-      Your note will be stored on the record.
+      ⚠ The wallet will <strong>not</strong> be credited. Your note is stored on the record.
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Rejection Reason * (max 1000 chars)</label>
       <textarea id="bd-rej-note" maxlength="1000"
-        placeholder="Transaction reference not found. Please re-submit with correct reference."></textarea>
+        placeholder="Reference not found. Re-submit with the correct reference."></textarea>
     </div>
     <div id="bd-rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="bd-rej-btn"
-        onclick="rejectBankDeposit('${id}')">✕ Confirm Reject</button>
+      <button class="btn-danger" id="bd-rej-btn" onclick="rejectBankDeposit('${esc(id)}')">✕ Confirm Reject</button>
     </div>`);
 }
 
 async function rejectBankDeposit(id) {
   const adminNote = document.getElementById('bd-rej-note').value.trim();
   if (!adminNote) {
-    document.getElementById('bd-rej-msg').innerHTML =
-      '<div class="alert alert-error">✕ Rejection reason is required.</div>';
+    document.getElementById('bd-rej-msg').innerHTML = errorBox('A rejection reason is required.');
     return;
   }
-
   const btn = document.getElementById('bd-rej-btn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
@@ -1233,13 +1356,11 @@ async function rejectBankDeposit(id) {
     showAlert('Deposit rejected.', 'success');
     renderBankDeposits(bankDepositPage);
   } catch (e) {
-    document.getElementById('bd-rej-msg').innerHTML =
-      `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('bd-rej-msg').innerHTML = errorBox(e.message);
     btn.disabled = false; btn.innerHTML = '✕ Confirm Reject';
   }
 }
 
-// ── CSV export ────────────────────────────────────────────────────────────────
 async function exportBankDepositsCSV() {
   const btn = document.querySelector('[onclick="exportBankDepositsCSV()"]');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
@@ -1255,49 +1376,23 @@ async function exportBankDepositsCSV() {
       total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.', 'error'); return; }
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
 
-    // Sort newest first
     rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    if (bankDepositTab === 'momo') rows = rows.filter(d => isMomo(d.ngnAmountSent));
+    else if (bankDepositTab === 'bank') rows = rows.filter(d => !isMomo(d.ngnAmountSent));
 
-    // Apply same client-side filter as the current tab
-    if (bankDepositTab === 'momo') {
-      rows = rows.filter(d => isMomo(d.ngnAmountSent));
-    } else if (bankDepositTab === 'bank') {
-      rows = rows.filter(d => !isMomo(d.ngnAmountSent));
-    }
-
-    const headers = [
-      'ID', 'Type', 'User ID', 'Transfer Reference', 'Amount Sent',
-      'Currency', 'Expected Credit', 'Credited Amount', 'Sender Account Name',
-      'Status', 'User Note', 'Admin Note',
-      'Reviewed By', 'Reviewed At', 'Wallet Tx ID',
-      'Created At', 'Updated At'
-    ];
-    exportCSV(
-      `bank-momo-deposits-${bankDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
-      headers,
-      rows.map(d => [
-        d.id,
-        isMomo(d.ngnAmountSent) ? 'MoMo' : 'Bank Transfer',
-        d.userId,
-        d.transferReference,
-        d.ngnAmountSent,
-        depositCurrency(d.ngnAmountSent),
-        d.expectedNgnCredit,
-        d.creditedNgnAmount ?? '',
-        d.senderAccountName ?? '',
-        d.status,
-        d.userNote    ?? '',
-        d.adminNote   ?? '',
-        d.reviewedBy  ?? '',
-        d.reviewedAt  ?? '',
-        d.walletTransactionId ?? '',
-        d.createdAt,
-        d.updatedAt   ?? ''
-      ])
-    );
-    showAlert(`Exported ${rows.length} deposit rows!`, 'success');
+    exportCSV(`bank-momo-deposits-${bankDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'Type', 'User ID', 'Transfer Reference', 'Amount Sent', 'Currency',
+        'Expected Credit', 'Credited Amount', 'Sender Account Name', 'Status',
+        'User Note', 'Admin Note', 'Reviewed By', 'Reviewed At', 'Wallet Tx ID',
+        'Created At', 'Updated At'],
+      rows.map(d => [d.id, depositLabel(d.ngnAmountSent), d.userId, d.transferReference,
+        d.ngnAmountSent, depositCurrency(d.ngnAmountSent), d.expectedNgnCredit,
+        d.creditedNgnAmount ?? '', d.senderAccountName ?? '', d.status,
+        d.userNote ?? '', d.adminNote ?? '', d.reviewedBy ?? '', d.reviewedAt ?? '',
+        d.walletTransactionId ?? '', d.createdAt, d.updatedAt ?? '']));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
   } catch (e) {
     showAlert('Export failed: ' + e.message, 'error');
   } finally {
@@ -1317,33 +1412,38 @@ async function renderUpgradeChats() {
       <div class="card-header"><h2>Admin Upgrade Chats</h2></div>
       <div class="card-body">
         <div class="tabs">
-          <button class="tab ${chatTab==='all'?'active':''}"     onclick="chatTab='all';renderUpgradeChats()">All Chats</button>
-          <button class="tab ${chatTab==='pending'?'active':''}" onclick="chatTab='pending';renderUpgradeChats()">⏳ Pending Commission</button>
+          <button class="tab ${chatTab === 'all' ? 'active' : ''}"
+            onclick="chatTab='all';renderUpgradeChats()">All Chats</button>
+          <button class="tab ${chatTab === 'pending' ? 'active' : ''}"
+            onclick="chatTab='pending';renderUpgradeChats()">⏳ Pending Commission</button>
         </div>
         <div id="chats-list">${loading()}</div>
       </div>
     </div>`;
   try {
-    const ep   = chatTab==='pending' ? '/api/super-admin/upgrade-chats/pending' : '/api/super-admin/upgrade-chats';
+    const ep = chatTab === 'pending'
+      ? '/api/super-admin/upgrade-chats/pending'
+      : '/api/super-admin/upgrade-chats';
     const data = await api(ep);
-    const list = Array.isArray(data) ? data : (data.content||[]);
+    const list = Array.isArray(data) ? data : (data.content || []);
+
     document.getElementById('chats-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
         <thead><tr><th>Chat ID</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody>${list.map(ch => `<tr>
-          ${labeledTd('Chat ID', `<span class="mono">${truncate(ch.id,32)}</span>`)}
-          ${labeledTd('Status',  statusBadge(ch.status))}
+          ${labeledTd('Chat ID', `<span class="mono">${truncEsc(ch.id, 32)}</span>`)}
+          ${labeledTd('Status', statusBadge(ch.status))}
           ${labeledTd('Created', `<span class="mono">${fmtDate(ch.createdAt)}</span>`)}
           ${labeledTd('Actions', `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick="openChat('${ch.id}','${ch.status}')">Open Chat</button>
-            ${ch.status==='PENDING_COMMISSION'
-              ? `<button class="btn-primary btn-sm" onclick="openSetCommission('${ch.id}')">Set Commission</button>`
+            <button class="btn-ghost btn-sm" onclick="openChat('${esc(ch.id)}','${esc(ch.status)}')">Open Chat</button>
+            ${ch.status === 'PENDING_COMMISSION'
+              ? `<button class="btn-primary btn-sm" onclick="openSetCommission('${esc(ch.id)}')">Set Commission</button>`
               : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
-      </table></div>` : empty('No chats found.');
+      </table></div>` : empty('No chats yet.');
   } catch (e) {
-    document.getElementById('chats-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('chats-list').innerHTML = errorBox(e.message);
   }
 }
 
@@ -1351,20 +1451,22 @@ async function openChat(chatId, status) {
   openModal('Upgrade Chat', loading());
   try {
     const msgs = await api(`/api/super-admin/upgrade-chats/${chatId}/messages`);
-    const list = Array.isArray(msgs) ? msgs : (msgs.content||[]);
-    document.getElementById('modal-content').innerHTML = `
-      ${status==='PENDING_COMMISSION' ? `
+    const list = Array.isArray(msgs) ? msgs : (msgs.content || []);
+
+    setModalContent(`
+      ${status === 'PENDING_COMMISSION' ? `
         <div class="alert alert-warning" style="margin-bottom:14px">
-          ⚠ This chat is awaiting commission rate assignment.
-          <button class="btn-primary btn-sm" style="margin-left:10px" onclick="closeModal();openSetCommission('${chatId}')">Set Commission</button>
+          ⚠ This chat is awaiting a commission rate.
+          <button class="btn-primary btn-sm" style="margin-left:10px"
+            onclick="closeModal();openSetCommission('${esc(chatId)}')">Set Commission</button>
         </div>` : ''}
       <div class="chat-messages" id="chat-msgs">
         ${list.length ? list.map(m => `
-          <div class="msg ${(m.senderRole||'system').toLowerCase()}">
-            <div>${m.content}</div>
-            <div class="msg-meta">${m.senderRole} · ${fmtDate(m.sentAt)}</div>
+          <div class="msg ${esc((m.senderRole || 'system').toLowerCase())}">
+            <div>${esc(m.content)}</div>
+            <div class="msg-meta">${esc(m.senderRole)} · ${fmtDate(m.sentAt)}</div>
           </div>`).join('')
-          : '<div style="text-align:center;color:var(--text-dim);padding:24px">No messages yet.</div>'}
+        : '<div style="text-align:center;color:var(--text-dim);padding:24px">No messages yet.</div>'}
       </div>
       <div class="form-group" style="margin-bottom:10px">
         <label>Reply as Super Admin (max 2000 chars)</label>
@@ -1373,29 +1475,31 @@ async function openChat(chatId, status) {
       <div id="chat-alert"></div>
       <div class="modal-footer">
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-        <button class="btn-primary" id="chat-send-btn" onclick="sendChatMessage('${chatId}','${status}')">Send Message</button>
-      </div>`;
+        <button class="btn-primary" id="chat-send-btn"
+          onclick="sendChatMessage('${esc(chatId)}','${esc(status)}')">Send Message</button>
+      </div>`);
+
     const box = document.getElementById('chat-msgs');
     if (box) box.scrollTop = box.scrollHeight;
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
 async function sendChatMessage(chatId, status) {
   const content = document.getElementById('chat-reply').value.trim();
   if (!content) {
-    document.getElementById('chat-alert').innerHTML = '<div class="alert alert-error">✕ Message cannot be empty.</div>';
+    document.getElementById('chat-alert').innerHTML = errorBox('Message cannot be empty.');
     return;
   }
   const btn = document.getElementById('chat-send-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Sending…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Sending…';
   try {
     await api(`/api/super-admin/upgrade-chats/${chatId}/messages`, 'POST', { content });
     openChat(chatId, status);
   } catch (e) {
-    document.getElementById('chat-alert').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='Send Message';
+    document.getElementById('chat-alert').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = 'Send Message';
   }
 }
 
@@ -1404,7 +1508,7 @@ function openSetCommission(chatId) {
     <p style="margin-bottom:16px">
       Finalise admin onboarding by setting the referral commission percentage.
       Valid range: <strong>0.1 – 100.0</strong>.
-      Status will change to <span class="badge badge-green">COMMISSION_SET</span>.
+      Status changes to <span class="badge badge-green">COMMISSION_SET</span>.
     </p>
     <div class="form-group" style="margin-bottom:12px">
       <label>Commission Rate (%)</label>
@@ -1413,35 +1517,35 @@ function openSetCommission(chatId) {
     <div id="comm-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-primary" id="comm-btn" onclick="setCommission('${chatId}')">Confirm</button>
+      <button class="btn-primary" id="comm-btn" onclick="setCommission('${esc(chatId)}')">Confirm</button>
     </div>`);
 }
 
 async function setCommission(chatId) {
   const commissionRate = parseFloat(document.getElementById('comm-rate').value);
   if (!commissionRate || commissionRate < 0.1 || commissionRate > 100) {
-    document.getElementById('comm-msg').innerHTML = '<div class="alert alert-error">✕ Enter a value between 0.1 and 100.</div>';
+    document.getElementById('comm-msg').innerHTML = errorBox('Enter a value between 0.1 and 100.');
     return;
   }
   const btn = document.getElementById('comm-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Setting…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Setting…';
   try {
     await api(`/api/super-admin/upgrade-chats/${chatId}/set-commission`, 'POST', { commissionRate });
     closeModal();
-    showAlert(`Commission set to ${commissionRate}%!`, 'success');
+    showAlert(`Commission set to ${commissionRate}%.`, 'success');
     renderUpgradeChats();
   } catch (e) {
-    document.getElementById('comm-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='Confirm';
+    document.getElementById('comm-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = 'Confirm';
   }
 }
 
 // ============================================================
 // 8. AFFILIATE WITHDRAWALS
 // ============================================================
-let affPage=0, affStatus='';
+let affPage = 0, affStatus = '';
 
-async function renderAffiliateWithdrawals(page=0) {
+async function renderAffiliateWithdrawals(page = 0) {
   affPage = page;
   const c = document.getElementById('page-content');
   c.innerHTML = `
@@ -1455,110 +1559,123 @@ async function renderAffiliateWithdrawals(page=0) {
           <div class="form-group">
             <label>Status</label>
             <select onchange="affStatus=this.value;renderAffiliateWithdrawals(0)">
-              <option value=""          ${affStatus===''?'selected':''}>All statuses</option>
-              <option value="PENDING"   ${affStatus==='PENDING'?'selected':''}>PENDING</option>
-              <option value="PROCESSED" ${affStatus==='PROCESSED'?'selected':''}>PROCESSED</option>
-              <option value="REJECTED"  ${affStatus==='REJECTED'?'selected':''}>REJECTED</option>
+              <option value=""          ${affStatus === '' ? 'selected' : ''}>All statuses</option>
+              <option value="PENDING"   ${affStatus === 'PENDING' ? 'selected' : ''}>PENDING</option>
+              <option value="PROCESSED" ${affStatus === 'PROCESSED' ? 'selected' : ''}>PROCESSED</option>
+              <option value="REJECTED"  ${affStatus === 'REJECTED' ? 'selected' : ''}>REJECTED</option>
             </select>
           </div>
         </div>
         <div id="aff-list">${loading()}</div>
       </div>
     </div>`;
+
   try {
     let q = `?page=${affPage}&size=20`;
-    if (affStatus) q += `&status=${affStatus}`;
+    if (affStatus) q += `&status=${encodeURIComponent(affStatus)}`;
     const data = await api(`/api/super-admin/affiliate-withdrawals${q}`);
     const list = data.content || [];
+
     document.getElementById('aff-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>ID</th><th>User ID</th><th>Amount</th><th>Reference</th><th>Status</th><th>Created</th><th>Processed At</th><th>Reject Reason</th><th>Actions</th></tr></thead>
+        <thead><tr>
+          <th>ID</th><th>User ID</th><th>Amount</th><th>Reference</th>
+          <th>Status</th><th>Requested</th><th>Processed At</th><th>Reject Reason</th><th>Actions</th>
+        </tr></thead>
         <tbody>${list.map(w => `<tr>
-          ${labeledTd('ID',             `<span class="mono">${truncate(w.id,16)}</span>`)}
-          ${labeledTd('User ID',        `<span class="mono">${truncate(w.userId,14)}</span>`)}
-          ${labeledTd('Amount',         `<strong>₵${fmt(w.amount)}</strong>`)}
-          ${labeledTd('Reference',      `<span class="mono">${w.reference||'—'}</span>`)}
-          ${labeledTd('Status',         statusBadge(w.status))}
-          ${labeledTd('Created',        `<span class="mono">${fmtDate(w.createdAt)}</span>`)}
-          ${labeledTd('Processed At',   `<span class="mono">${fmtDate(w.processedAt)}</span>`)}
-          ${labeledTd('Reject Reason',  w.rejectReason||'—')}
-          ${labeledTd('Actions', w.status==='PENDING' ? `<div class="btn-row">
-            <button class="btn-success btn-sm" onclick="processAffWithdrawal('${w.id}')">Mark Processed</button>
-            <button class="btn-danger btn-sm"  onclick="openRejectAffWithdrawal('${w.id}')">Reject</button>
+          ${labeledTd('ID', `<span class="mono">${truncEsc(w.id, 16)}</span>`)}
+          ${labeledTd('User ID', `<span class="mono">${truncEsc(w.userId, 14)}</span>`)}
+          ${labeledTd('Amount', `<strong>₵${fmt(w.amount)}</strong>`)}
+          ${labeledTd('Reference', `<span class="mono">${esc(w.reference) || '—'}</span>`)}
+          ${labeledTd('Status', statusBadge(w.status))}
+          ${/* backend sorts by requestedAt; fall back to createdAt if that's the field name */ ''}
+          ${labeledTd('Requested', `<span class="mono">${fmtDate(w.requestedAt || w.createdAt)}</span>`)}
+          ${labeledTd('Processed At', `<span class="mono">${fmtDate(w.processedAt)}</span>`)}
+          ${labeledTd('Reject Reason', esc(w.rejectReason) || '—')}
+          ${labeledTd('Actions', w.status === 'PENDING' ? `<div class="btn-row">
+            <button class="btn-success btn-sm" onclick="processAffWithdrawal('${esc(w.id)}')">Mark Processed</button>
+            <button class="btn-danger btn-sm" onclick="openRejectAffWithdrawal('${esc(w.id)}')">Reject</button>
           </div>` : '—')}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total</span>
         ${paginator(affPage, data.totalPages, 'renderAffiliateWithdrawals')}
-      </div>` : empty('No withdrawals found.');
+      </div>` : empty('No affiliate withdrawals found.');
   } catch (e) {
-    document.getElementById('aff-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('aff-list').innerHTML = errorBox(e.message);
   }
 }
 
 async function processAffWithdrawal(id) {
-  if (!confirm('Mark this withdrawal as PROCESSED? This records the payment as completed.')) return;
+  if (!confirm('Mark this withdrawal as PROCESSED? This records the payment as sent.')) return;
   try {
     await api(`/api/super-admin/affiliate-withdrawals/${id}/process`, 'POST');
-    showAlert('Withdrawal marked as PROCESSED.', 'success');
+    showAlert('Withdrawal marked as processed.', 'success');
     renderAffiliateWithdrawals(affPage);
-  } catch (e) { showAlert('Error: '+e.message, 'error'); }
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
+  }
 }
 
 function openRejectAffWithdrawal(id) {
   openModal('Reject Withdrawal', `
-    <div class="alert alert-warning">⚠ Rejecting will re-credit the user's affiliate wallet.</div>
+    <div class="alert alert-warning">⚠ Rejecting re-credits the affiliate wallet.</div>
     <div class="form-group" style="margin-bottom:12px;margin-top:4px">
       <label>Reason *</label>
-      <textarea id="aff-rej-reason" placeholder="Bank account details not matching…"></textarea>
+      <textarea id="aff-rej-reason" placeholder="Bank account details do not match…"></textarea>
     </div>
     <div id="aff-rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="aff-rej-btn" onclick="rejectAffWithdrawal('${id}')">Reject & Re-credit Wallet</button>
+      <button class="btn-danger" id="aff-rej-btn"
+        onclick="rejectAffWithdrawal('${esc(id)}')">Reject &amp; Re-credit Wallet</button>
     </div>`);
 }
 
 async function rejectAffWithdrawal(id) {
   const reason = document.getElementById('aff-rej-reason').value.trim();
   if (!reason) {
-    document.getElementById('aff-rej-msg').innerHTML = '<div class="alert alert-error">✕ Reason is required.</div>';
+    document.getElementById('aff-rej-msg').innerHTML = errorBox('A reason is required.');
     return;
   }
   const btn = document.getElementById('aff-rej-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Rejecting…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
     await api(`/api/super-admin/affiliate-withdrawals/${id}/reject`, 'POST', { reason });
     closeModal();
     showAlert('Withdrawal rejected. Wallet re-credited.', 'success');
     renderAffiliateWithdrawals(affPage);
   } catch (e) {
-    document.getElementById('aff-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='Reject & Re-credit Wallet';
+    document.getElementById('aff-rej-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = 'Reject &amp; Re-credit Wallet';
   }
 }
 
 async function exportAffWithdrawalsCSV() {
   const btn = document.querySelector('[onclick="exportAffWithdrawalsCSV()"]');
-  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
-    let rows=[], p=0, total=1;
+    let rows = [], p = 0, total = 1;
     while (p < total) {
       let q = `?page=${p}&size=100`;
-      if (affStatus) q+=`&status=${affStatus}`;
+      if (affStatus) q += `&status=${encodeURIComponent(affStatus)}`;
       const d = await api(`/api/super-admin/affiliate-withdrawals${q}`);
-      rows = rows.concat(d.content||[]);
-      total = d.totalPages||1;
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.','error'); return; }
-    const headers=['ID','User ID','Amount (GHS)','Reference','Status','Created At','Processed At','Reject Reason'];
-    exportCSV(`affiliate-withdrawals-${new Date().toISOString().slice(0,10)}.csv`, headers,
-      rows.map(w=>[w.id,w.userId,w.amount,w.reference,w.status,w.createdAt,w.processedAt??'',w.rejectReason??'']));
-    showAlert(`Exported ${rows.length} rows!`, 'success');
-  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
-  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    exportCSV(`affiliate-withdrawals-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'User ID', 'Amount (GHS)', 'Reference', 'Status', 'Requested At', 'Processed At', 'Reject Reason'],
+      rows.map(w => [w.id, w.userId, w.amount, w.reference, w.status,
+        w.requestedAt || w.createdAt, w.processedAt ?? '', w.rejectReason ?? '']));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
@@ -1571,7 +1688,7 @@ async function renderPayoutRequests() {
       <div class="card-header">
         <h2>Admin Payout Requests</h2>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:12px;color:var(--text-muted)">Note: API returns REQUESTED status only</span>
+          <span style="font-size:12px;color:var(--text-muted)">This endpoint returns REQUESTED only</span>
           <button class="btn-ghost btn-sm" onclick="renderPayoutRequests()">↻ Refresh</button>
         </div>
       </div>
@@ -1579,86 +1696,91 @@ async function renderPayoutRequests() {
     </div>`;
   try {
     const data = await api('/api/super-admin/payout-requests');
-    const list = Array.isArray(data) ? data : (data.content||[]);
+    const list = Array.isArray(data) ? data : (data.content || []);
+
     document.getElementById('payout-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
         <thead><tr><th>ID</th><th>Amount</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody>${list.map(p => `<tr>
-          ${labeledTd('ID',      `<span class="mono">${truncate(p.id,22)}</span>`)}
-          ${labeledTd('Amount',  `<strong>₵${fmt(p.amount)}</strong>`)}
-          ${labeledTd('Status',  statusBadge(p.status))}
+          ${labeledTd('ID', `<span class="mono">${truncEsc(p.id, 22)}</span>`)}
+          ${labeledTd('Amount', `<strong>₵${fmt(p.amount)}</strong>`)}
+          ${labeledTd('Status', statusBadge(p.status))}
           ${labeledTd('Created', `<span class="mono">${fmtDate(p.createdAt)}</span>`)}
           ${labeledTd('Actions', `<div class="btn-row">
-            ${p.status==='REQUESTED' ? `
-              <button class="btn-success btn-sm" onclick="approvePayoutReq('${p.id}')">Approve</button>
-              <button class="btn-danger btn-sm"  onclick="openRejectPayoutReq('${p.id}')">Reject</button>` : ''}
-            ${p.status==='APPROVED' ? `
-              <button class="btn-primary btn-sm" onclick="markPayoutPaid('${p.id}')">Mark Paid</button>
-              <button class="btn-danger btn-sm"  onclick="openRejectPayoutReq('${p.id}')">Reject</button>` : ''}
+            ${p.status === 'REQUESTED' ? `
+              <button class="btn-success btn-sm" onclick="approvePayoutReq('${esc(p.id)}')">Approve</button>
+              <button class="btn-danger btn-sm" onclick="openRejectPayoutReq('${esc(p.id)}')">Reject</button>` : ''}
+            ${p.status === 'APPROVED' ? `
+              <button class="btn-primary btn-sm" onclick="markPayoutPaid('${esc(p.id)}')">Mark Paid</button>
+              <button class="btn-danger btn-sm" onclick="openRejectPayoutReq('${esc(p.id)}')">Reject</button>` : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>` : empty('No pending payout requests.');
   } catch (e) {
-    document.getElementById('payout-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('payout-list').innerHTML = errorBox(e.message);
   }
 }
 
 async function approvePayoutReq(id) {
-  if (!confirm('Approve this payout request? (Wallet not debited yet — debit happens on Mark Paid.)')) return;
+  if (!confirm('Approve this payout request? The wallet is debited later, on Mark Paid.')) return;
   try {
     await api(`/api/super-admin/payout-requests/${id}/approve`, 'POST');
-    showAlert('Payout approved. Use "Mark Paid" to debit the wallet when payment is sent.', 'success', 6000);
+    showAlert('Payout approved. Use Mark Paid to debit the wallet once payment is sent.', 'success', 6000);
     renderPayoutRequests();
-  } catch (e) { showAlert('Error: '+e.message, 'error'); }
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
+  }
 }
 
 async function markPayoutPaid(id) {
-  if (!confirm("Mark as PAID? ⚠ This will immediately debit the admin's affiliate wallet.")) return;
+  if (!confirm("Mark as PAID? ⚠ This debits the admin's affiliate wallet immediately.")) return;
   try {
     await api(`/api/super-admin/payout-requests/${id}/mark-paid`, 'POST');
-    showAlert('Payout marked as PAID. Affiliate wallet debited.', 'success');
+    showAlert('Payout marked as paid. Affiliate wallet debited.', 'success');
     renderPayoutRequests();
-  } catch (e) { showAlert('Error: '+e.message, 'error'); }
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
+  }
 }
 
 function openRejectPayoutReq(id) {
   openModal('Reject Payout Request', `
     <div class="form-group" style="margin-bottom:12px">
       <label>Rejection Reason *</label>
-      <textarea id="pr-rej-reason" placeholder="Insufficient verification…"></textarea>
+      <textarea id="pr-rej-reason" placeholder="Verification incomplete…"></textarea>
     </div>
     <div id="pr-rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="pr-rej-btn" onclick="rejectPayoutReq('${id}')">Reject</button>
+      <button class="btn-danger" id="pr-rej-btn" onclick="rejectPayoutReq('${esc(id)}')">Reject</button>
     </div>`);
 }
 
 async function rejectPayoutReq(id) {
   const reason = document.getElementById('pr-rej-reason').value.trim();
   if (!reason) {
-    document.getElementById('pr-rej-msg').innerHTML = '<div class="alert alert-error">✕ Reason is required.</div>';
+    document.getElementById('pr-rej-msg').innerHTML = errorBox('A reason is required.');
     return;
   }
   const btn = document.getElementById('pr-rej-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Rejecting…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
     await api(`/api/super-admin/payout-requests/${id}/reject`, 'POST', { reason });
     closeModal();
     showAlert('Payout request rejected.', 'success');
     renderPayoutRequests();
   } catch (e) {
-    document.getElementById('pr-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='Reject';
+    document.getElementById('pr-rej-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = 'Reject';
   }
 }
 
 // ============================================================
 // 10. AUDIT LOG
 // ============================================================
-let auditPage=0;
+let auditPage = 0;
 
-async function renderAuditLog(page=0) {
+async function renderAuditLog(page = 0) {
   auditPage = page;
   const c = document.getElementById('page-content');
   c.innerHTML = `
@@ -1669,33 +1791,39 @@ async function renderAuditLog(page=0) {
   try {
     const data = await api(`/api/super-admin/audit-log?page=${auditPage}&size=50`);
     const list = data.content || [];
+
     document.getElementById('audit-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Date</th><th>Action</th><th>Resource</th><th>Resource ID</th><th>Actor ID</th><th>Metadata</th></tr></thead>
+        <thead><tr>
+          <th>Date</th><th>Action</th><th>Resource</th>
+          <th>Resource ID</th><th>Actor ID</th><th>Metadata</th>
+        </tr></thead>
         <tbody>${list.map(a => `<tr>
-          ${labeledTd('Date',        `<span class="mono">${fmtDate(a.createdAt)}</span>`)}
-          ${labeledTd('Action',      `<span class="badge badge-blue">${a.action||'—'}</span>`)}
-          ${labeledTd('Resource',    a.resource||'—')}
-          ${labeledTd('Resource ID', `<span class="mono">${truncate(a.resourceId,20)}</span>`)}
-          ${labeledTd('Actor ID',    `<span class="mono">${truncate(a.actorId,20)}</span>`)}
-          ${labeledTd('Metadata',    a.metadata ? `<span style="font-size:11px;color:var(--text-muted)">${JSON.stringify(a.metadata)}</span>` : '—')}
+          ${labeledTd('Date', `<span class="mono">${fmtDate(a.createdAt)}</span>`)}
+          ${labeledTd('Action', `<span class="badge badge-blue">${esc(a.action) || '—'}</span>`)}
+          ${labeledTd('Resource', esc(a.resource) || '—')}
+          ${labeledTd('Resource ID', `<span class="mono">${truncEsc(a.resourceId, 20)}</span>`)}
+          ${labeledTd('Actor ID', `<span class="mono">${truncEsc(a.actorId, 20)}</span>`)}
+          ${labeledTd('Metadata', a.metadata
+            ? `<span style="font-size:11px;color:var(--text-muted)">${esc(JSON.stringify(a.metadata))}</span>`
+            : '—')}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total entries</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total entries</span>
         ${paginator(auditPage, data.totalPages, 'renderAuditLog')}
-      </div>` : empty('No audit entries found.');
+      </div>` : empty('No audit entries yet.');
   } catch (e) {
-    document.getElementById('audit-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('audit-list').innerHTML = errorBox(e.message);
   }
 }
 
 // ============================================================
 // 11. WITHDRAWAL REQUESTS
 // ============================================================
-let wdPage=0, wdStatus='';
+let wdPage = 0, wdStatus = '';
 
-async function renderWithdrawals(page=0) {
+async function renderWithdrawals(page = 0) {
   wdPage = page;
   const c = document.getElementById('page-content');
   c.innerHTML = `
@@ -1709,28 +1837,26 @@ async function renderWithdrawals(page=0) {
       </div>
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:16px">
-          ℹ <strong>Flow:</strong>
-          User submits → wallet debited immediately →
-          <span class="badge badge-yellow">PENDING</span> →
-          Approve →
-          <span class="badge badge-green">APPROVED</span> →
-          Settle (payment sent) →
+          ℹ <strong>Flow:</strong> user submits → wallet debited →
+          <span class="badge badge-yellow">PENDING</span> → Approve →
+          <span class="badge badge-green">APPROVED</span> → Settle once paid →
           <span class="badge badge-green">SETTLED</span>.
-          Rejecting or marking failed at any stage <strong>re-credits</strong> the user's wallet.
+          Rejecting or marking failed at any stage <strong>re-credits</strong> the wallet.
         </div>
         <div class="form-row" style="margin-bottom:16px">
           <div class="form-group">
             <label>Status</label>
             <select onchange="wdStatus=this.value;renderWithdrawals(0)">
-              <option value=""         ${wdStatus===''?'selected':''}>All statuses</option>
-              <option value="PENDING"  ${wdStatus==='PENDING'?'selected':''}>PENDING</option>
-              <option value="APPROVED" ${wdStatus==='APPROVED'?'selected':''}>APPROVED</option>
-              <option value="SETTLED"  ${wdStatus==='SETTLED'?'selected':''}>SETTLED</option>
-              <option value="REJECTED" ${wdStatus==='REJECTED'?'selected':''}>REJECTED</option>
-              <option value="FAILED"   ${wdStatus==='FAILED'?'selected':''}>FAILED</option>
+              <option value=""         ${wdStatus === '' ? 'selected' : ''}>All statuses</option>
+              <option value="PENDING"  ${wdStatus === 'PENDING' ? 'selected' : ''}>PENDING</option>
+              <option value="APPROVED" ${wdStatus === 'APPROVED' ? 'selected' : ''}>APPROVED</option>
+              <option value="SETTLED"  ${wdStatus === 'SETTLED' ? 'selected' : ''}>SETTLED</option>
+              <option value="REJECTED" ${wdStatus === 'REJECTED' ? 'selected' : ''}>REJECTED</option>
+              <option value="FAILED"   ${wdStatus === 'FAILED' ? 'selected' : ''}>FAILED</option>
             </select>
           </div>
-          <button class="btn-ghost" style="align-self:flex-end" onclick="wdStatus='';renderWithdrawals(0)">Clear</button>
+          <button class="btn-ghost" style="align-self:flex-end"
+            onclick="wdStatus='';renderWithdrawals(0)">Clear</button>
         </div>
         <div id="wd-list">${loading()}</div>
       </div>
@@ -1738,9 +1864,10 @@ async function renderWithdrawals(page=0) {
 
   try {
     let q = `?page=${wdPage}&size=20`;
-    if (wdStatus) q += `&status=${wdStatus}`;
+    if (wdStatus) q += `&status=${encodeURIComponent(wdStatus)}`;
     const data = await api(`/api/wallet/withdrawals/admin/all${q}`);
     const list = data.content || [];
+    cacheRows('withdrawals', list);
 
     document.getElementById('wd-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
@@ -1749,114 +1876,125 @@ async function renderWithdrawals(page=0) {
           <th>Account</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody>${list.map(w => `<tr>
-          ${labeledTd('Date',    `<span class="mono">${fmtDate(w.createdAt)}</span>`)}
-          ${labeledTd('User',    w.user ? `<span style="font-size:12px">${(w.user.firstName||'')+' '+(w.user.lastName||'')}<br><span class="mono" style="color:var(--text-dim)">${w.user.email||''}</span></span>` : `<span class="mono">${truncate(w.userId,16)}</span>`)}
-          ${labeledTd('Amount',  `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
-          ${labeledTd('Method',  `<span class="badge badge-blue">${w.method||'—'}</span>${w.network ? `<span class="badge badge-gray" style="margin-left:4px">${w.network}</span>` : ''}`)}
-          ${labeledTd('Account', `<span class="mono" style="font-size:12px">${w.accountNumber||'—'}<br>${w.accountName||''}</span>`)}
-          ${labeledTd('Status',  statusBadge(w.status))}
+          ${labeledTd('Date', `<span class="mono">${fmtDate(w.createdAt)}</span>`)}
+          ${labeledTd('User', w.user
+            ? `<span style="font-size:12px">${esc(`${w.user.firstName || ''} ${w.user.lastName || ''}`.trim())}<br>
+               <span class="mono" style="color:var(--text-dim)">${esc(w.user.email || '')}</span></span>`
+            : `<span class="mono">${truncEsc(w.userId, 16)}</span>`)}
+          ${labeledTd('Amount', `<strong style="color:var(--red-text)">₵${fmt(w.amount)}</strong>`)}
+          ${labeledTd('Method', `<span class="badge badge-blue">${esc(w.method) || '—'}</span>${
+            w.network ? `<span class="badge badge-gray" style="margin-left:4px">${esc(w.network)}</span>` : ''}`)}
+          ${labeledTd('Account', `<span class="mono" style="font-size:12px">${esc(w.accountNumber) || '—'}<br>${esc(w.accountName) || ''}</span>`)}
+          ${labeledTd('Status', statusBadge(w.status))}
           ${labeledTd('Actions', `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick='viewWithdrawal(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Detail</button>
-            ${w.status==='PENDING' ? `
-              <button class="btn-success btn-sm" onclick="approveWithdrawal('${w.id}')">Approve</button>
-              <button class="btn-danger btn-sm"  onclick="openRejectWithdrawal('${w.id}')">Reject</button>` : ''}
-            ${w.status==='APPROVED' ? `
-              <button class="btn-primary btn-sm" onclick="openSettleWithdrawal('${w.id}',${w.amount})">Settle</button>
-              <button class="btn-danger btn-sm"  onclick="openFailWithdrawal('${w.id}')">Mark Failed</button>` : ''}
+            <button class="btn-ghost btn-sm" onclick="viewWithdrawal('${esc(w.id)}')">Detail</button>
+            ${w.status === 'PENDING' ? `
+              <button class="btn-success btn-sm" onclick="approveWithdrawal('${esc(w.id)}')">Approve</button>
+              <button class="btn-danger btn-sm" onclick="openRejectWithdrawal('${esc(w.id)}')">Reject</button>` : ''}
+            ${w.status === 'APPROVED' ? `
+              <button class="btn-primary btn-sm" onclick="openSettleWithdrawal('${esc(w.id)}',${Number(w.amount) || 0})">Settle</button>
+              <button class="btn-danger btn-sm" onclick="openFailWithdrawal('${esc(w.id)}')">Mark Failed</button>` : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total withdrawal requests</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total withdrawal requests</span>
         ${paginator(wdPage, data.totalPages, 'renderWithdrawals')}
       </div>` : empty('No withdrawal requests found.');
   } catch (e) {
-    document.getElementById('wd-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('wd-list').innerHTML = errorBox(e.message);
   }
 }
 
-function viewWithdrawal(w) {
+function viewWithdrawal(id) {
+  const w = rowCache.withdrawals[id];
+  if (!w) { showAlert('That row is no longer loaded — refresh the page.', 'error'); return; }
   const user = w.user || {};
+
   openModal('Withdrawal Request Detail', `
     <div class="section-title">Request</div>
     <div class="detail-grid">
-      ${detailRow('ID',              `<span class="mono">${w.id}</span>`)}
-      ${detailRow('Status',          statusBadge(w.status))}
-      ${detailRow('Amount',          `<strong>₵${fmt(w.amount)}</strong>`)}
-      ${detailRow('Currency',        w.currency||'GHS')}
-      ${detailRow('Method',          w.method||'—')}
-      ${detailRow('Network',         w.network||'—')}
-      ${detailRow('Account Number',  w.accountNumber||'—')}
-      ${detailRow('Account Name',    w.accountName||'—')}
-      ${detailRow('Submitted',       fmtDate(w.createdAt))}
-      ${detailRow('Reviewed At',     fmtDate(w.reviewedAt))}
-      ${detailRow('Settled At',      fmtDate(w.settledAt))}
-      ${detailRow('Admin Note',      w.adminNote||'—')}
-      ${detailRow('Super Admin Note',w.superAdminNote||'—')}
+      ${detailRow('ID', `<span class="mono">${esc(w.id)}</span>`)}
+      ${detailRow('Status', statusBadge(w.status))}
+      ${detailRow('Amount', `<strong>₵${fmt(w.amount)}</strong>`)}
+      ${detailRow('Currency', esc(w.currency || 'GHS'))}
+      ${detailRow('Method', esc(w.method) || '—')}
+      ${detailRow('Network', esc(w.network) || '—')}
+      ${detailRow('Account Number', esc(w.accountNumber) || '—')}
+      ${detailRow('Account Name', esc(w.accountName) || '—')}
+      ${detailRow('Submitted', fmtDate(w.createdAt))}
+      ${detailRow('Reviewed At', fmtDate(w.reviewedAt))}
+      ${detailRow('Settled At', fmtDate(w.settledAt))}
+      ${detailRow('Admin Note', esc(w.adminNote) || '—')}
+      ${detailRow('Super Admin Note', esc(w.superAdminNote) || '—')}
     </div>
     ${w.user ? `
       <div class="section-title">User</div>
       <div class="detail-grid">
-        ${detailRow('Name',  `${user.firstName||''} ${user.lastName||''}`.trim())}
-        ${detailRow('Email', user.email||'—')}
-        ${detailRow('ID',    `<span class="mono">${user.id||w.userId}</span>`)}
+        ${detailRow('Name', esc(`${user.firstName || ''} ${user.lastName || ''}`.trim()))}
+        ${detailRow('Email', esc(user.email) || '—')}
+        ${detailRow('ID', `<span class="mono">${esc(user.id || w.userId)}</span>`)}
       </div>` : ''}
     <div class="modal-footer">
-      ${w.status==='PENDING' ? `
-        <button class="btn-success" onclick="closeModal();approveWithdrawal('${w.id}')">Approve</button>
-        <button class="btn-danger"  onclick="closeModal();openRejectWithdrawal('${w.id}')">Reject</button>` : ''}
-      ${w.status==='APPROVED' ? `
-        <button class="btn-primary" onclick="closeModal();openSettleWithdrawal('${w.id}',${w.amount})">Settle</button>
-        <button class="btn-danger"  onclick="closeModal();openFailWithdrawal('${w.id}')">Mark Failed</button>` : ''}
+      ${w.status === 'PENDING' ? `
+        <button class="btn-success" onclick="closeModal();approveWithdrawal('${esc(w.id)}')">Approve</button>
+        <button class="btn-danger" onclick="closeModal();openRejectWithdrawal('${esc(w.id)}')">Reject</button>` : ''}
+      ${w.status === 'APPROVED' ? `
+        <button class="btn-primary" onclick="closeModal();openSettleWithdrawal('${esc(w.id)}',${Number(w.amount) || 0})">Settle</button>
+        <button class="btn-danger" onclick="closeModal();openFailWithdrawal('${esc(w.id)}')">Mark Failed</button>` : ''}
       <button class="btn-ghost" onclick="closeModal()">Close</button>
     </div>`);
 }
 
 async function approveWithdrawal(id) {
-  if (!confirm('Approve this withdrawal request?\n\nThe wallet has already been debited — this just moves it to APPROVED for settlement.')) return;
+  if (!confirm('Approve this withdrawal?\n\nThe wallet is already debited — this moves it to APPROVED for settlement.')) return;
   try {
     await api(`/api/wallet/withdrawals/admin/${id}/approve`, 'POST', { note: '' });
-    showAlert('Withdrawal approved. Now use Settle once payment is sent.', 'success', 6000);
+    showAlert('Withdrawal approved. Settle it once the payment is sent.', 'success', 6000);
     renderWithdrawals(wdPage);
-  } catch (e) { showAlert('Error: '+e.message, 'error'); }
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
+  }
 }
 
 function openRejectWithdrawal(id) {
   openModal('Reject Withdrawal', `
-    <div class="alert alert-warning">⚠ Rejecting will <strong>re-credit</strong> the full amount back to the user's wallet.</div>
+    <div class="alert alert-warning">⚠ Rejecting <strong>re-credits</strong> the full amount to the user's wallet.</div>
     <div class="form-group" style="margin-bottom:12px;margin-top:12px">
-      <label>Rejection Note * (visible to admin)</label>
-      <textarea id="wd-rej-note" placeholder="Unable to verify account details…"></textarea>
+      <label>Rejection Note * (visible to the admin)</label>
+      <textarea id="wd-rej-note" placeholder="Could not verify the account details…"></textarea>
     </div>
     <div id="wd-rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="wd-rej-btn" onclick="rejectWithdrawal('${id}')">✕ Reject & Re-credit Wallet</button>
+      <button class="btn-danger" id="wd-rej-btn"
+        onclick="rejectWithdrawal('${esc(id)}')">✕ Reject &amp; Re-credit Wallet</button>
     </div>`);
 }
 
 async function rejectWithdrawal(id) {
   const note = document.getElementById('wd-rej-note').value.trim();
   if (!note) {
-    document.getElementById('wd-rej-msg').innerHTML = '<div class="alert alert-error">✕ Rejection note is required.</div>';
+    document.getElementById('wd-rej-msg').innerHTML = errorBox('A rejection note is required.');
     return;
   }
   const btn = document.getElementById('wd-rej-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Rejecting…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
     await api(`/api/wallet/withdrawals/admin/${id}/reject`, 'POST', { note });
     closeModal();
-    showAlert('Withdrawal rejected. User wallet has been re-credited.', 'success');
+    showAlert('Withdrawal rejected. Wallet re-credited.', 'success');
     renderWithdrawals(wdPage);
   } catch (e) {
-    document.getElementById('wd-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='✕ Reject & Re-credit Wallet';
+    document.getElementById('wd-rej-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = '✕ Reject &amp; Re-credit Wallet';
   }
 }
 
 function openSettleWithdrawal(id, amount) {
   openModal('Settle Withdrawal', `
-    <div class="alert alert-info">ℹ Settling confirms you have <strong>physically sent ₵${fmt(amount)}</strong> to the user. The WITHDRAW_HOLD transaction will be converted to WITHDRAW.</div>
+    <div class="alert alert-info">ℹ Settling confirms you have sent
+      <strong>₵${fmt(amount)}</strong> to the user. The WITHDRAW_HOLD becomes a WITHDRAW.</div>
     <div class="form-group" style="margin-bottom:12px;margin-top:12px">
       <label>Super Admin Note (optional)</label>
       <textarea id="wd-settle-note" placeholder="Sent via MTN Mobile Money. Ref: XXXXXXXX"></textarea>
@@ -1864,90 +2002,89 @@ function openSettleWithdrawal(id, amount) {
     <div id="wd-settle-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-success" id="wd-settle-btn" onclick="settleWithdrawal('${id}')">✓ Confirm Settlement</button>
+      <button class="btn-success" id="wd-settle-btn"
+        onclick="settleWithdrawal('${esc(id)}')">✓ Confirm Settlement</button>
     </div>`);
 }
 
 async function settleWithdrawal(id) {
   const note = document.getElementById('wd-settle-note').value.trim();
   const btn = document.getElementById('wd-settle-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Settling…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Settling…';
   try {
     await api(`/api/wallet/withdrawals/super-admin/${id}/settle`, 'POST', { note });
     closeModal();
-    showAlert('Withdrawal settled successfully! Payment confirmed.', 'success');
+    showAlert('Withdrawal settled. Payment confirmed.', 'success');
     renderWithdrawals(wdPage);
   } catch (e) {
-    document.getElementById('wd-settle-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='✓ Confirm Settlement';
+    document.getElementById('wd-settle-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = '✓ Confirm Settlement';
   }
 }
 
 function openFailWithdrawal(id) {
   openModal('Mark Withdrawal Failed', `
-    <div class="alert alert-warning">⚠ Marking as failed will <strong>re-credit</strong> the full amount back to the user's wallet.</div>
+    <div class="alert alert-warning">⚠ Marking failed <strong>re-credits</strong> the full amount to the user's wallet.</div>
     <div class="form-group" style="margin-bottom:12px;margin-top:12px">
-      <label>Failure Reason * (visible to super admin log)</label>
-      <textarea id="wd-fail-note" placeholder="Mobile Money transaction declined by provider…"></textarea>
+      <label>Failure Reason *</label>
+      <textarea id="wd-fail-note" placeholder="Mobile Money transaction declined by the provider…"></textarea>
     </div>
     <div id="wd-fail-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="wd-fail-btn" onclick="failWithdrawal('${id}')">Mark as Failed & Re-credit</button>
+      <button class="btn-danger" id="wd-fail-btn"
+        onclick="failWithdrawal('${esc(id)}')">Mark Failed &amp; Re-credit</button>
     </div>`);
 }
 
 async function failWithdrawal(id) {
   const note = document.getElementById('wd-fail-note').value.trim();
   if (!note) {
-    document.getElementById('wd-fail-msg').innerHTML = '<div class="alert alert-error">✕ Failure reason is required.</div>';
+    document.getElementById('wd-fail-msg').innerHTML = errorBox('A failure reason is required.');
     return;
   }
   const btn = document.getElementById('wd-fail-btn');
-  btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Processing…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Processing…';
   try {
     await api(`/api/wallet/withdrawals/super-admin/${id}/mark-failed`, 'POST', { note });
     closeModal();
-    showAlert('Withdrawal marked as failed. User wallet has been re-credited.', 'success');
+    showAlert('Withdrawal marked failed. Wallet re-credited.', 'success');
     renderWithdrawals(wdPage);
   } catch (e) {
-    document.getElementById('wd-fail-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-    btn.disabled=false; btn.innerHTML='Mark as Failed & Re-credit';
+    document.getElementById('wd-fail-msg').innerHTML = errorBox(e.message);
+    btn.disabled = false; btn.innerHTML = 'Mark Failed &amp; Re-credit';
   }
 }
 
 async function exportWithdrawalsCSV() {
   const btn = document.querySelector('[onclick="exportWithdrawalsCSV()"]');
-  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
-    let rows=[], p=0, total=1;
+    let rows = [], p = 0, total = 1;
     while (p < total) {
       let q = `?page=${p}&size=100`;
-      if (wdStatus) q+=`&status=${wdStatus}`;
+      if (wdStatus) q += `&status=${encodeURIComponent(wdStatus)}`;
       const d = await api(`/api/wallet/withdrawals/admin/all${q}`);
-      rows = rows.concat(d.content||[]);
-      total = d.totalPages||1;
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.','error'); return; }
-    const headers=['ID','User Email','User ID','Amount (GHS)','Currency','Method','Network',
-      'Account Number','Account Name','Status','Admin Note','Super Admin Note',
-      'Reviewed At','Settled At','Created At'];
-    exportCSV(`withdrawals-${new Date().toISOString().slice(0,10)}.csv`, headers,
-      rows.map(w=>[
-        w.id,
-        w.user?.email??'',
-        w.user?.id??w.userId??'',
-        w.amount, w.currency||'GHS',
-        w.method||'', w.network||'',
-        w.accountNumber||'', w.accountName||'',
-        w.status,
-        w.adminNote||'', w.superAdminNote||'',
-        w.reviewedAt??'', w.settledAt??'', w.createdAt
-      ]));
-    showAlert(`Exported ${rows.length} withdrawal rows!`, 'success');
-  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
-  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    exportCSV(`withdrawals-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'User Email', 'User ID', 'Amount (GHS)', 'Currency', 'Method', 'Network',
+        'Account Number', 'Account Name', 'Status', 'Admin Note', 'Super Admin Note',
+        'Reviewed At', 'Settled At', 'Created At'],
+      rows.map(w => [w.id, w.user?.email ?? '', w.user?.id ?? w.userId ?? '',
+        w.amount, w.currency || 'GHS', w.method || '', w.network || '',
+        w.accountNumber || '', w.accountName || '', w.status,
+        w.adminNote || '', w.superAdminNote || '',
+        w.reviewedAt ?? '', w.settledAt ?? '', w.createdAt]));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
@@ -1967,60 +2104,62 @@ async function renderUserDeposits(page = 0) {
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:16px">
           ℹ Enter a User ID to load their full deposit history, paginated from the server.
-          Calls <code>GET /api/super-admin/users/{userId}/deposits</code>.
         </div>
         <div class="form-row" style="margin-bottom:16px">
           <div class="form-group" style="flex:1;min-width:260px">
             <label>User ID (UUID) *</label>
             <input id="ud-userid" type="text" placeholder="e.g. c9d0e1f2-…"
-              value="${udFilterUserId}"
+              value="${esc(udFilterUserId)}"
               oninput="udFilterUserId=this.value"
               onkeydown="if(event.key==='Enter')renderUserDeposits(0)">
           </div>
           <div class="form-group" style="flex:1;min-width:180px">
-            <label>User Email (display only)</label>
-            <input id="ud-email" type="text" placeholder="For reference…"
-              value="${udFilterUserEmail}"
-              oninput="udFilterUserEmail=this.value">
+            <label>User Email (for reference)</label>
+            <input id="ud-email" type="text" placeholder="Display only…"
+              value="${esc(udFilterUserEmail)}" oninput="udFilterUserEmail=this.value">
           </div>
           <div style="display:flex;gap:6px;align-self:flex-end">
-            <button class="btn-primary" onclick="udFilterUserId=document.getElementById('ud-userid').value.trim();udFilterUserEmail=document.getElementById('ud-email').value.trim();renderUserDeposits(0)">Load Deposits</button>
-            <button class="btn-ghost"   onclick="udFilterUserId='';udFilterUserEmail='';renderUserDeposits(0)">Clear</button>
+            <button class="btn-primary" onclick="loadUserDepositsFromInputs()">Load Deposits</button>
+            <button class="btn-ghost"
+              onclick="udFilterUserId='';udFilterUserEmail='';renderUserDeposits(0)">Clear</button>
           </div>
         </div>
-        <div id="ud-list">${udFilterUserId ? loading('Fetching deposits…') : '<div class="empty"><div class="empty-icon">📥</div>Enter a User ID above and click Load Deposits.</div>'}</div>
+        <div id="ud-list">${udFilterUserId
+          ? loading('Fetching deposits…')
+          : '<div class="empty"><div class="empty-icon">📥</div>Enter a User ID above to load their deposits.</div>'}</div>
       </div>
     </div>`;
 
   if (!udFilterUserId) return;
 
   try {
-    const data = await api(`/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${udPage}&size=25`);
+    const data = await api(
+      `/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${udPage}&size=25`);
     const list = data.content || [];
 
     if (!list.length && udPage === 0) {
-      document.getElementById('ud-list').innerHTML = empty('No deposits found for this user.');
+      document.getElementById('ud-list').innerHTML = empty('No deposits for this user.');
       return;
     }
 
     const firstName = list[0]?.firstName || '';
-    const lastName  = list[0]?.lastName  || '';
-    const email     = list[0]?.userEmail || udFilterUserEmail || '—';
-    const userId    = list[0]?.userId    || udFilterUserId;
-    const pageTotal = list.reduce((s, d) => s + Number(d.amount), 0);
+    const lastName = list[0]?.lastName || '';
+    const email = list[0]?.userEmail || udFilterUserEmail || '—';
+    const userId = list[0]?.userId || udFilterUserId;
+    const pageTotal = list.reduce((s, d) => s + (Number(d.amount) || 0), 0);
 
     document.getElementById('ud-list').innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
         <div style="background:var(--surface-alt,#1e2433);border-radius:8px;padding:10px 16px;display:flex;gap:24px;flex-wrap:wrap">
           <span><span style="color:var(--text-dim);font-size:12px">User</span><br>
-            <strong>${firstName} ${lastName}</strong>
-            <span style="color:var(--text-dim);font-size:12px;margin-left:6px">${email}</span></span>
+            <strong>${esc(`${firstName} ${lastName}`.trim())}</strong>
+            <span style="color:var(--text-dim);font-size:12px;margin-left:6px">${esc(email)}</span></span>
           <span><span style="color:var(--text-dim);font-size:12px">Total Records</span><br>
-            <strong>${data.totalElements.toLocaleString()}</strong></span>
+            <strong>${fmtInt(data.totalElements)}</strong></span>
           <span><span style="color:var(--text-dim);font-size:12px">Page Total</span><br>
             <strong style="color:var(--green-text)">₵${fmt(pageTotal)}</strong></span>
         </div>
-        <button class="btn-ghost btn-sm" onclick="viewUser('${userId}')">View Full Profile</button>
+        <button class="btn-ghost btn-sm" onclick="viewUser('${esc(userId)}')">View full profile</button>
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
@@ -2028,58 +2167,65 @@ async function renderUserDeposits(page = 0) {
           <th>Status</th><th>Provider Ref</th><th>Tx ID</th>
         </tr></thead>
         <tbody>${list.map((d, i) => `<tr>
-          ${labeledTd('#',             String(udPage * 25 + i + 1))}
-          ${labeledTd('Date',          `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('Amount',        `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
+          ${labeledTd('#', String(udPage * 25 + i + 1))}
+          ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('Amount', `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
           ${labeledTd('Balance After', `₵${fmt(d.balanceAfter)}`)}
-          ${labeledTd('Status',        statusBadge(d.status))}
-          ${labeledTd('Provider Ref',  `<span class="mono" style="font-size:11px">${truncate(d.providerRef, 24)}</span>`)}
-          ${labeledTd('Tx ID',         `<span class="mono" style="font-size:11px">${truncate(String(d.transactionId||'—'), 20)}</span>`)}
+          ${labeledTd('Status', statusBadge(d.status))}
+          ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncEsc(d.providerRef, 24)}</span>`)}
+          ${labeledTd('Tx ID', `<span class="mono" style="font-size:11px">${truncEsc(d.transactionId, 20)}</span>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total deposits</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total deposits</span>
         ${paginator(udPage, data.totalPages, 'renderUserDeposits')}
       </div>`;
   } catch (e) {
-    document.getElementById('ud-list').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('ud-list').innerHTML = errorBox(e.message);
   }
+}
+
+function loadUserDepositsFromInputs() {
+  udFilterUserId = document.getElementById('ud-userid').value.trim();
+  udFilterUserEmail = document.getElementById('ud-email').value.trim();
+  renderUserDeposits(0);
 }
 
 async function exportUserDepositsCSV() {
   if (!udFilterUserId) { showAlert('Enter a User ID first.', 'error'); return; }
   const btn = document.querySelector('[onclick="exportUserDepositsCSV()"]');
-  if (btn) { btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Exporting…'; }
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Exporting…'; }
   try {
-    let rows=[], p=0, total=1;
+    let rows = [], p = 0, total = 1;
     while (p < total) {
-      const d = await api(`/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${p}&size=100`);
-      rows = rows.concat(d.content||[]);
-      total = d.totalPages||1;
+      const d = await api(
+        `/api/super-admin/users/${encodeURIComponent(udFilterUserId)}/deposits?page=${p}&size=100`);
+      rows = rows.concat(d.content || []);
+      total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.','error'); return; }
-    const headers=['Tx ID','Wallet ID','User ID','User Email','First Name','Last Name',
-                   'Amount (GHS)','Balance After','Provider Ref','Status','Created At'];
-    const safeEmail = (rows[0]?.userEmail || udFilterUserId).replace(/[^a-z0-9]/gi,'_');
-    exportCSV(`deposits-${safeEmail}-${new Date().toISOString().slice(0,10)}.csv`, headers,
-      rows.map(d=>[
-        d.transactionId, d.walletId, d.userId, d.userEmail,
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    const safeEmail = (rows[0]?.userEmail || udFilterUserId).replace(/[^a-z0-9]/gi, '_');
+    exportCSV(`deposits-${safeEmail}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Tx ID', 'Wallet ID', 'User ID', 'User Email', 'First Name', 'Last Name',
+        'Amount (GHS)', 'Balance After', 'Provider Ref', 'Status', 'Created At'],
+      rows.map(d => [d.transactionId, d.walletId, d.userId, d.userEmail,
         d.firstName, d.lastName, d.amount, d.balanceAfter,
-        d.providerRef||'', d.status, d.createdAt
-      ]));
-    showAlert(`Exported ${rows.length} deposit rows!`, 'success');
-  } catch(e) { showAlert('Export failed: '+e.message,'error'); }
-  finally { if (btn) { btn.disabled=false; btn.innerHTML='⬇ Export CSV'; } }
+        d.providerRef || '', d.status, d.createdAt]));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
+  } catch (e) {
+    showAlert('Export failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
 }
 
 // ============================================================
 // 13. SIMPLE DEPOSITS (MoMo — phone/account submission flow)
 // ============================================================
-// Backed by SimpleDepositController / SimpleDepositService:
-//   GET  /api/admin/simple-deposits            — all, paginated
-//   GET  /api/admin/simple-deposits/pending     — pending queue
-//   GET  /api/admin/simple-deposits/{id}        — single detail
+//   GET  /api/admin/simple-deposits
+//   GET  /api/admin/simple-deposits/pending
+//   GET  /api/admin/simple-deposits/{id}
 //   POST /api/admin/simple-deposits/{id}/approve  { creditedAmount, adminNote }
 //   POST /api/admin/simple-deposits/{id}/reject   { adminNote }
 // ─────────────────────────────────────────────────────────────
@@ -2096,13 +2242,13 @@ async function renderSimpleDeposits(page = 0) {
       </div>
       <div class="card-body">
         <div class="alert alert-info" style="margin-bottom:14px">
-          ℹ Users submit amount, phone number, account name and network directly (no screenshot).
-          Approving credits the wallet immediately and attributes referral commission.
+          ℹ Users submit amount, phone number, account name and network directly — no screenshot.
+          Approving credits the wallet and attributes referral commission.
         </div>
         <div class="tabs">
-          <button class="tab ${simpleDepositTab==='pending'?'active':''}"
+          <button class="tab ${simpleDepositTab === 'pending' ? 'active' : ''}"
             onclick="simpleDepositTab='pending';renderSimpleDeposits(0)">⏳ Pending Review</button>
-          <button class="tab ${simpleDepositTab==='all'?'active':''}"
+          <button class="tab ${simpleDepositTab === 'all' ? 'active' : ''}"
             onclick="simpleDepositTab='all';renderSimpleDeposits(0)">All Deposits</button>
         </div>
         <div id="simple-deposit-list">${loading()}</div>
@@ -2125,30 +2271,29 @@ async function renderSimpleDeposits(page = 0) {
           <th>Purpose</th><th>Amount Claimed</th><th>Credited</th><th>Status</th><th>Actions</th>
         </tr></thead>
         <tbody>${list.map(d => `<tr>
-          ${labeledTd('Date',            `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('Phone',           `<span class="mono">${d.phoneNumber||'—'}</span>`)}
-          ${labeledTd('Account Name',    d.accountName||'—')}
-          ${labeledTd('Network',         networkBadge(d.network))}
-          ${labeledTd('Purpose',         purposeBadge(d.purpose))}
-          ${labeledTd('Amount Claimed',  `<strong>₵${fmt(d.amount)}</strong>`)}
-          ${labeledTd('Credited',        d.creditedAmount != null
+          ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
+          ${labeledTd('Phone', `<span class="mono">${esc(d.phoneNumber) || '—'}</span>`)}
+          ${labeledTd('Account Name', esc(d.accountName) || '—')}
+          ${labeledTd('Network', networkBadge(d.network))}
+          ${labeledTd('Purpose', purposeBadge(d.purpose))}
+          ${labeledTd('Amount Claimed', `<strong>₵${fmt(d.amount)}</strong>`)}
+          ${labeledTd('Credited', d.creditedAmount != null
             ? `<strong style="color:var(--green-text)">₵${fmt(d.creditedAmount)}</strong>` : '—')}
-          ${labeledTd('Status',          statusBadge(d.status))}
+          ${labeledTd('Status', statusBadge(d.status))}
           ${labeledTd('Actions', `<div class="btn-row">
-            <button class="btn-ghost btn-sm" onclick="viewSimpleDeposit('${d.id}')">View</button>
+            <button class="btn-ghost btn-sm" onclick="viewSimpleDeposit('${esc(d.id)}')">View</button>
             ${d.status === 'PENDING' ? `
-              <button class="btn-success btn-sm" onclick="openApproveSimpleDeposit('${d.id}', ${d.amount})">Approve</button>
-              <button class="btn-danger btn-sm"  onclick="openRejectSimpleDeposit('${d.id}')">Reject</button>` : ''}
+              <button class="btn-success btn-sm" onclick="openApproveSimpleDeposit('${esc(d.id)}',${Number(d.amount) || 0})">Approve</button>
+              <button class="btn-danger btn-sm" onclick="openRejectSimpleDeposit('${esc(d.id)}')">Reject</button>` : ''}
           </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
-        <span class="pager-info">${data.totalElements.toLocaleString()} total</span>
+        <span class="pager-info">${fmtInt(data.totalElements)} total</span>
         ${paginator(simpleDepositPage, data.totalPages, 'renderSimpleDeposits')}
-      </div>` : empty(isPendingTab ? 'No pending simple deposits found.' : 'No simple deposits found.');
+      </div>` : empty(isPendingTab ? 'Nothing awaiting review.' : 'No simple deposits yet.');
   } catch (e) {
-    document.getElementById('simple-deposit-list').innerHTML =
-      `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('simple-deposit-list').innerHTML = errorBox(e.message);
   }
 }
 
@@ -2156,80 +2301,78 @@ async function viewSimpleDeposit(id) {
   openModal('Simple Deposit Detail', loading());
   try {
     const d = await api(`/api/admin/simple-deposits/${id}`);
-    document.getElementById('modal-content').innerHTML = `
+    setModalContent(`
       <div class="section-title">Deposit Info</div>
       <div class="detail-grid">
-        ${detailRow('ID',                  `<span class="mono">${d.id}</span>`)}
-        ${detailRow('Status',              statusBadge(d.status))}
-        ${detailRow('Network',             networkBadge(d.network))}
-        ${detailRow('Purpose',             purposeBadge(d.purpose))}
-        ${detailRow('Phone Number',        `<span class="mono">${d.phoneNumber||'—'}</span>`)}
-        ${detailRow('Account Name',        d.accountName||'—')}
-        ${detailRow('Amount Claimed',      `₵${fmt(d.amount)}`)}
-        ${detailRow('Credited Amount',     d.creditedAmount != null
-            ? `<strong style="color:var(--green-text)">₵${fmt(d.creditedAmount)}</strong>` : '—')}
-        ${detailRow('Admin Note',          d.adminNote || '—')}
-        ${detailRow('Reviewed By',         d.reviewedBy ? `<span class="mono">${d.reviewedBy}</span>` : '—')}
-        ${detailRow('Reviewed At',         fmtDate(d.reviewedAt))}
-        ${detailRow('Created',             fmtDate(d.createdAt))}
+        ${detailRow('ID', `<span class="mono">${esc(d.id)}</span>`)}
+        ${detailRow('Status', statusBadge(d.status))}
+        ${detailRow('Network', networkBadge(d.network))}
+        ${detailRow('Purpose', purposeBadge(d.purpose))}
+        ${detailRow('Phone Number', `<span class="mono">${esc(d.phoneNumber) || '—'}</span>`)}
+        ${detailRow('Account Name', esc(d.accountName) || '—')}
+        ${detailRow('Amount Claimed', `₵${fmt(d.amount)}`)}
+        ${detailRow('Credited Amount', d.creditedAmount != null
+          ? `<strong style="color:var(--green-text)">₵${fmt(d.creditedAmount)}</strong>` : '—')}
+        ${detailRow('Admin Note', esc(d.adminNote) || '—')}
+        ${detailRow('Reviewed By', d.reviewedBy ? `<span class="mono">${esc(d.reviewedBy)}</span>` : '—')}
+        ${detailRow('Reviewed At', fmtDate(d.reviewedAt))}
+        ${detailRow('Created', fmtDate(d.createdAt))}
       </div>
       <div class="modal-footer">
         ${d.status === 'PENDING' ? `
           <button class="btn-success"
-            onclick="closeModal();openApproveSimpleDeposit('${d.id}', ${d.amount})">✓ Approve</button>
+            onclick="closeModal();openApproveSimpleDeposit('${esc(d.id)}',${Number(d.amount) || 0})">✓ Approve</button>
           <button class="btn-danger"
-            onclick="closeModal();openRejectSimpleDeposit('${d.id}')">✕ Reject</button>` : ''}
+            onclick="closeModal();openRejectSimpleDeposit('${esc(d.id)}')">✕ Reject</button>` : ''}
         <button class="btn-ghost" onclick="closeModal()">Close</button>
-      </div>`;
+      </div>`);
   } catch (e) {
-    document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    setModalContent(errorBox(e.message));
   }
 }
 
 function openApproveSimpleDeposit(id, claimedAmount) {
   openModal('Approve Simple Deposit', `
     <div class="alert alert-info" style="margin-bottom:14px">
-      ℹ The user's wallet will be credited immediately on approval, and referral
-      commission will be attributed if this user was referred.
+      ℹ The wallet is credited immediately, and referral commission is attributed
+      if this user was referred.
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Amount to Credit * <span style="color:var(--text-dim);font-size:12px">
         (adjust if it differs from the claimed amount)</span></label>
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:18px;font-weight:600">₵</span>
-        <input id="sd-appr-amt" type="number" step="0.01" min="0.01" value="${claimedAmount}" style="flex:1">
+        <input id="sd-appr-amt" type="number" step="0.01" min="0.01" value="${Number(claimedAmount) || 0}" style="flex:1">
       </div>
     </div>
     <div class="form-group" style="margin-bottom:12px">
       <label>Admin Note (optional)</label>
-      <textarea id="sd-appr-note" placeholder="MoMo transaction confirmed via network statement."></textarea>
+      <textarea id="sd-appr-note" placeholder="MoMo transaction confirmed against the network statement."></textarea>
     </div>
     <div id="sd-appr-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-success" id="sd-appr-btn" onclick="approveSimpleDeposit('${id}')">✓ Confirm Approve</button>
+      <button class="btn-success" id="sd-appr-btn"
+        onclick="approveSimpleDeposit('${esc(id)}')">✓ Confirm Approve</button>
     </div>`);
 }
 
 async function approveSimpleDeposit(id) {
   const creditedAmount = parseFloat(document.getElementById('sd-appr-amt').value);
-  const adminNote      = document.getElementById('sd-appr-note').value.trim();
-
+  const adminNote = document.getElementById('sd-appr-note').value.trim();
   if (!creditedAmount || creditedAmount <= 0) {
-    document.getElementById('sd-appr-msg').innerHTML =
-      '<div class="alert alert-error">✕ Enter a valid amount to credit.</div>';
+    document.getElementById('sd-appr-msg').innerHTML = errorBox('Enter a valid amount to credit.');
     return;
   }
-
   const btn = document.getElementById('sd-appr-btn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Approving…';
   try {
     await api(`/api/admin/simple-deposits/${id}/approve`, 'POST', { creditedAmount, adminNote });
     closeModal();
-    showAlert(`Deposit approved! ₵${fmt(creditedAmount)} credited to user wallet.`, 'success');
+    showAlert(`Approved. ₵${fmt(creditedAmount)} credited to the user's wallet.`, 'success');
     renderSimpleDeposits(simpleDepositPage);
   } catch (e) {
-    document.getElementById('sd-appr-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('sd-appr-msg').innerHTML = errorBox(e.message);
     btn.disabled = false; btn.innerHTML = '✓ Confirm Approve';
   }
 }
@@ -2237,27 +2380,26 @@ async function approveSimpleDeposit(id) {
 function openRejectSimpleDeposit(id) {
   openModal('Reject Simple Deposit', `
     <div class="alert alert-warning" style="margin-bottom:14px">
-      ⚠ The user's wallet will <strong>NOT</strong> be credited. Your note will be stored on the record.
+      ⚠ The wallet will <strong>not</strong> be credited. Your note is stored on the record.
     </div>
     <div class="form-group" style="margin-bottom:12px">
-      <label>Rejection Reason * (required)</label>
-      <textarea id="sd-rej-note" placeholder="Unable to confirm MoMo transaction from the given phone number."></textarea>
+      <label>Rejection Reason *</label>
+      <textarea id="sd-rej-note" placeholder="Could not confirm the MoMo transaction from that number."></textarea>
     </div>
     <div id="sd-rej-msg"></div>
     <div class="modal-footer">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn-danger" id="sd-rej-btn" onclick="rejectSimpleDeposit('${id}')">✕ Confirm Reject</button>
+      <button class="btn-danger" id="sd-rej-btn"
+        onclick="rejectSimpleDeposit('${esc(id)}')">✕ Confirm Reject</button>
     </div>`);
 }
 
 async function rejectSimpleDeposit(id) {
   const adminNote = document.getElementById('sd-rej-note').value.trim();
   if (!adminNote) {
-    document.getElementById('sd-rej-msg').innerHTML =
-      '<div class="alert alert-error">✕ Rejection reason is required.</div>';
+    document.getElementById('sd-rej-msg').innerHTML = errorBox('A rejection reason is required.');
     return;
   }
-
   const btn = document.getElementById('sd-rej-btn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rejecting…';
   try {
@@ -2266,7 +2408,7 @@ async function rejectSimpleDeposit(id) {
     showAlert('Deposit rejected.', 'success');
     renderSimpleDeposits(simpleDepositPage);
   } catch (e) {
-    document.getElementById('sd-rej-msg').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+    document.getElementById('sd-rej-msg').innerHTML = errorBox(e.message);
     btn.disabled = false; btn.innerHTML = '✕ Confirm Reject';
   }
 }
@@ -2286,23 +2428,15 @@ async function exportSimpleDepositsCSV() {
       total = d.totalPages || 1;
       p++;
     }
-    if (!rows.length) { showAlert('No data to export.', 'error'); return; }
-
-    const headers = [
-      'ID', 'Phone Number', 'Account Name', 'Network', 'Purpose',
-      'Amount Claimed', 'Credited Amount', 'Status', 'Admin Note',
-      'Reviewed By', 'Reviewed At', 'Wallet Tx ID', 'Created At'
-    ];
-    exportCSV(
-      `simple-deposits-${simpleDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
-      headers,
-      rows.map(d => [
-        d.id, d.phoneNumber, d.accountName, d.network, d.purpose,
+    if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
+    exportCSV(`simple-deposits-${simpleDepositTab}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['ID', 'Phone Number', 'Account Name', 'Network', 'Purpose',
+        'Amount Claimed', 'Credited Amount', 'Status', 'Admin Note',
+        'Reviewed By', 'Reviewed At', 'Wallet Tx ID', 'Created At'],
+      rows.map(d => [d.id, d.phoneNumber, d.accountName, d.network, d.purpose,
         d.amount, d.creditedAmount ?? '', d.status, d.adminNote ?? '',
-        d.reviewedBy ?? '', d.reviewedAt ?? '', d.walletTransactionId ?? '', d.createdAt
-      ])
-    );
-    showAlert(`Exported ${rows.length} simple deposit rows!`, 'success');
+        d.reviewedBy ?? '', d.reviewedAt ?? '', d.walletTransactionId ?? '', d.createdAt]));
+    showAlert(`Exported ${rows.length} rows.`, 'success');
   } catch (e) {
     showAlert('Export failed: ' + e.message, 'error');
   } finally {
@@ -2311,20 +2445,122 @@ async function exportSimpleDepositsCSV() {
 }
 
 // ============================================================
-// 14. COMMISSION & DEPOSIT ANALYTICS (Super Admin)
+// 14. COMMISSION & DEPOSIT ANALYTICS
 // ============================================================
-// Backed by SuperAdminCommissionController / SuperAdminDepositService:
+// Endpoints (hyphenated /api/super-admin/ prefix):
 //   GET /api/super-admin/commission/by-admin/daily?days=N
 //   GET /api/super-admin/commission/by-admin/weekly?weeks=N
 //   GET /api/super-admin/commission/totals/daily?days=N
 //   GET /api/super-admin/commission/totals/weekly?weeks=N
 //   GET /api/super-admin/deposits/daily?days=N
 //   GET /api/super-admin/deposits/weekly?weeks=N
-// NOTE: if your controllers are mapped at /api/superadmin/... instead,
-// update either the @RequestMapping there or the paths below to match.
+//
+// The by-admin endpoint returns one row per (period, admin). We fetch once,
+// cache, and group client-side — so switching between admins is instant and
+// costs zero extra requests.
 // ─────────────────────────────────────────────────────────────
-let analyticsPeriod = 'daily'; // 'daily' | 'weekly'
-let analyticsDays = 30, analyticsWeeks = 12;
+let analyticsPeriod = 'daily';   // 'daily' | 'weekly'
+let analyticsDays = 30;
+let analyticsWeeks = 12;
+let analyticsAdminId = '';       // '' = overview across all admins
+let analyticsCache = null;
+
+function analyticsRangeLabel() {
+  return analyticsPeriod === 'daily'
+    ? `last ${analyticsDays} day${analyticsDays !== 1 ? 's' : ''}`
+    : `last ${analyticsWeeks} week${analyticsWeeks !== 1 ? 's' : ''}`;
+}
+
+function analyticsQuery() {
+  return analyticsPeriod === 'daily'
+    ? `daily?days=${analyticsDays}`
+    : `weekly?weeks=${analyticsWeeks}`;
+}
+
+/** Entry point used from the admins page — opens analytics focused on one admin. */
+function openAdminAnalytics(adminId) {
+  analyticsAdminId = adminId || '';
+  analyticsCache = null;
+  navigate('commission-analytics');
+}
+
+async function fetchAnalytics() {
+  const q = analyticsQuery();
+  const [admins, byAdmin, commTotals, depTotals] = await Promise.allSettled([
+    api('/api/super-admin/admins'),
+    api(`/api/super-admin/commission/by-admin/${q}`),
+    api(`/api/super-admin/commission/totals/${q}`),
+    api(`/api/super-admin/deposits/${q}`)
+  ]);
+
+  const val = r => {
+    if (r.status !== 'fulfilled') return [];
+    const d = r.value;
+    return Array.isArray(d) ? d : (d?.content || []);
+  };
+  const err = r => (r.status === 'rejected' ? (r.reason?.message || 'Request failed') : null);
+
+  analyticsCache = {
+    admins: val(admins),
+    byAdmin: val(byAdmin),
+    commissionTotals: val(commTotals),
+    depositTotals: val(depTotals),
+    errors: {
+      'Admin list': err(admins),
+      'Commission by admin': err(byAdmin),
+      'Commission totals': err(commTotals),
+      'Deposit totals': err(depTotals)
+    }
+  };
+  return analyticsCache;
+}
+
+/**
+ * Merge the admin roster with commission rows so every admin appears —
+ * including those who earned nothing in the selected range.
+ */
+function groupCommissionByAdmin(cache) {
+  const map = new Map();
+
+  for (const a of cache.admins) {
+    if (!a?.id) continue;
+    map.set(a.id, {
+      adminId: a.id,
+      adminEmail: a.email || '—',
+      name: `${a.firstName || ''} ${a.lastName || ''}`.trim(),
+      currency: 'GHS',
+      total: 0,
+      periods: []
+    });
+  }
+
+  for (const r of cache.byAdmin) {
+    const id = r.adminId || 'unknown';
+    if (!map.has(id)) {
+      map.set(id, {
+        adminId: id, adminEmail: r.adminEmail || '—', name: '',
+        currency: r.currency || 'GHS', total: 0, periods: []
+      });
+    }
+    const g = map.get(id);
+    const amt = Number(r.amount) || 0;
+    g.total += amt;
+    g.currency = r.currency || g.currency;
+    if (r.adminEmail && g.adminEmail === '—') g.adminEmail = r.adminEmail;
+    g.periods.push({ label: r.periodLabel, amount: amt });
+  }
+
+  for (const g of map.values()) {
+    // Newest first — the backend returns ascending period labels.
+    g.periods.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
+    g.count = g.periods.length;
+    g.avg = g.count ? g.total / g.count : 0;
+    g.best = g.periods.reduce((m, p) => (p.amount > m.amount ? p : m), { amount: 0, label: '—' });
+    g.last = g.periods[0] || null;
+  }
+
+  return [...map.values()].sort((a, b) => b.total - a.total);
+}
 
 async function renderCommissionAnalytics() {
   const c = document.getElementById('page-content');
@@ -2332,124 +2568,280 @@ async function renderCommissionAnalytics() {
     <div class="card">
       <div class="card-header">
         <h2>Commission &amp; Deposit Analytics</h2>
+        <button class="btn-ghost btn-sm"
+          onclick="analyticsCache=null;renderCommissionAnalytics()">↻ Refresh</button>
       </div>
       <div class="card-body">
         <div class="tabs">
-          <button class="tab ${analyticsPeriod==='daily'?'active':''}"
-            onclick="analyticsPeriod='daily';renderCommissionAnalytics()">Daily</button>
-          <button class="tab ${analyticsPeriod==='weekly'?'active':''}"
-            onclick="analyticsPeriod='weekly';renderCommissionAnalytics()">Weekly</button>
+          <button class="tab ${analyticsPeriod === 'daily' ? 'active' : ''}"
+            onclick="analyticsPeriod='daily';analyticsCache=null;renderCommissionAnalytics()">Daily</button>
+          <button class="tab ${analyticsPeriod === 'weekly' ? 'active' : ''}"
+            onclick="analyticsPeriod='weekly';analyticsCache=null;renderCommissionAnalytics()">Weekly</button>
         </div>
-        <div class="form-row" style="margin:16px 0">
-          ${analyticsPeriod==='daily' ? `
-            <div class="form-group">
+
+        <div class="form-row" style="margin:16px 0;align-items:flex-end">
+          ${analyticsPeriod === 'daily' ? `
+            <div class="form-group" style="max-width:130px">
               <label>Days</label>
-              <input id="an-days" type="number" min="1" max="365" value="${analyticsDays}">
+              <input id="an-days" type="number" min="1" max="365" value="${analyticsDays}"
+                onkeydown="if(event.key==='Enter')applyAnalyticsRange()">
             </div>` : `
-            <div class="form-group">
+            <div class="form-group" style="max-width:130px">
               <label>Weeks</label>
-              <input id="an-weeks" type="number" min="1" max="52" value="${analyticsWeeks}">
+              <input id="an-weeks" type="number" min="1" max="52" value="${analyticsWeeks}"
+                onkeydown="if(event.key==='Enter')applyAnalyticsRange()">
             </div>`}
-          <button class="btn-primary" style="align-self:flex-end" onclick="applyAnalyticsRange()">Apply</button>
+          <button class="btn-primary" onclick="applyAnalyticsRange()">Apply</button>
+
+          <div class="form-group" style="flex:1;min-width:220px">
+            <label>Viewing</label>
+            <select id="an-admin-select" onchange="selectAnalyticsAdmin(this.value)">
+              <option value="">📊 All admins — overview</option>
+            </select>
+          </div>
         </div>
 
-        <div class="section-title">💰 Commission by Admin</div>
-        <div id="an-commission-by-admin">${loading()}</div>
-
-        <div class="section-title">📊 Platform Commission Totals</div>
-        <div id="an-commission-totals">${loading()}</div>
-
-        <div class="section-title">📥 Platform Deposit Totals</div>
-        <div id="an-deposit-totals">${loading()}</div>
+        <div id="an-body">${loading('Loading analytics…')}</div>
       </div>
     </div>`;
 
-  loadCommissionByAdmin();
-  loadCommissionTotals();
-  loadDepositTotals();
+  try {
+    if (!analyticsCache) await fetchAnalytics();
+    renderAnalyticsBody();
+  } catch (e) {
+    document.getElementById('an-body').innerHTML = errorBox(e.message);
+  }
 }
 
 function applyAnalyticsRange() {
   if (analyticsPeriod === 'daily') {
-    const v = parseInt(document.getElementById('an-days').value, 10);
-    analyticsDays = (v && v > 0) ? v : 30;
+    const v = parseInt(document.getElementById('an-days')?.value, 10);
+    analyticsDays = (v && v > 0 && v <= 365) ? v : 30;
   } else {
-    const v = parseInt(document.getElementById('an-weeks').value, 10);
-    analyticsWeeks = (v && v > 0) ? v : 12;
+    const v = parseInt(document.getElementById('an-weeks')?.value, 10);
+    analyticsWeeks = (v && v > 0 && v <= 52) ? v : 12;
   }
+  analyticsCache = null;
   renderCommissionAnalytics();
 }
 
-async function loadCommissionByAdmin() {
-  const el = document.getElementById('an-commission-by-admin');
-  try {
-    const ep = analyticsPeriod === 'daily'
-      ? `/api/super-admin/commission/by-admin/daily?days=${analyticsDays}`
-      : `/api/super-admin/commission/by-admin/weekly?weeks=${analyticsWeeks}`;
-    const list = await api(ep);
-    el.innerHTML = list.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Admin</th><th>Amount</th><th>Currency</th></tr></thead>
-        <tbody>${list.map(r => `<tr>
-          ${labeledTd('Period',   `<span class="mono">${r.periodLabel}</span>`)}
-          ${labeledTd('Admin',    r.adminEmail || '—')}
-          ${labeledTd('Amount',   `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
-          ${labeledTd('Currency', r.currency || 'GHS')}
-        </tr>`).join('')}</tbody>
-      </table></div>` : empty('No commission data for this range.');
-  } catch (e) {
-    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-  }
+function selectAnalyticsAdmin(id) {
+  analyticsAdminId = id || '';
+  renderAnalyticsBody();
 }
 
-async function loadCommissionTotals() {
-  const el = document.getElementById('an-commission-totals');
-  try {
-    const ep = analyticsPeriod === 'daily'
-      ? `/api/super-admin/commission/totals/daily?days=${analyticsDays}`
-      : `/api/super-admin/commission/totals/weekly?weeks=${analyticsWeeks}`;
-    const list = await api(ep);
-    el.innerHTML = list.length ? `
+function renderAnalyticsBody() {
+  const groups = groupCommissionByAdmin(analyticsCache);
+
+  const sel = document.getElementById('an-admin-select');
+  if (sel) {
+    sel.innerHTML = `<option value="">📊 All admins — overview</option>` +
+      groups.map(g => `<option value="${esc(g.adminId)}" ${analyticsAdminId === g.adminId ? 'selected' : ''}>
+        ${esc(g.adminEmail)} — ₵${fmt(g.total)}
+      </option>`).join('');
+  }
+
+  const el = document.getElementById('an-body');
+  if (!el) return;
+
+  el.innerHTML = analyticsAdminId
+    ? renderAdminAnalytics(groups.find(g => g.adminId === analyticsAdminId))
+    : renderAnalyticsOverview(groups);
+}
+
+// ── View A: overview across all admins ───────────────────────────────────────
+function renderAnalyticsOverview(groups) {
+  const { commissionTotals, depositTotals, errors } = analyticsCache;
+
+  const commissionSum = groups.reduce((s, g) => s + g.total, 0);
+  const depositSum = depositTotals.reduce((s, d) => s + (Number(d.amount) || 0), 0);
+  const depositCount = depositTotals.reduce((s, d) => s + (Number(d.count) || 0), 0);
+  const earning = groups.filter(g => g.total > 0);
+  const top = groups[0];
+  const rate = depositSum > 0 ? (commissionSum / depositSum) * 100 : 0;
+  const maxAdmin = Math.max(...groups.map(g => g.total), 0);
+  const maxDeposit = Math.max(...depositTotals.map(d => Number(d.amount) || 0), 0);
+  const maxComm = Math.max(...commissionTotals.map(r => Number(r.amount) || 0), 0);
+
+  const errBanner = Object.entries(errors)
+    .filter(([, v]) => v)
+    .map(([k, v]) => errorBox(`${k}: ${v}`)).join('');
+
+  return `
+    ${errBanner}
+    <div class="stat-grid">
+      ${statCard('💰', 'Total Commission Paid', `₵${fmt(commissionSum)}`, esc(analyticsRangeLabel()))}
+      ${statCard('📥', 'Total Deposits', `₵${fmt(depositSum)}`, `${fmtInt(depositCount)} transactions`)}
+      ${statCard('📊', 'Effective Commission Rate', `${rate.toFixed(1)}%`, 'commission ÷ deposits')}
+      ${statCard('👤', 'Earning Admins', `${earning.length} / ${groups.length}`, 'earned in this range')}
+      ${top && top.total > 0
+        ? statCard('🏆', 'Top Earner', `₵${fmt(top.total)}`, esc(top.adminEmail))
+        : ''}
+    </div>
+
+    <div class="section-title">👥 Commission by Admin — select a row to drill in</div>
+    ${groups.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Total Commission</th><th>Entries</th><th>Currency</th></tr></thead>
-        <tbody>${list.map(r => `<tr>
-          ${labeledTd('Period',           `<span class="mono">${r.periodLabel}</span>`)}
+        <thead><tr>
+          <th>#</th><th>Admin</th><th>Total Earned</th><th>Share</th>
+          <th>Periods</th><th>Avg / Period</th><th>Best Period</th><th></th>
+        </tr></thead>
+        <tbody>${groups.map((g, i) => `
+          <tr style="cursor:pointer" onclick="selectAnalyticsAdmin('${esc(g.adminId)}')">
+            ${labeledTd('#', `<span style="color:var(--text-dim)">${i + 1}</span>`)}
+            ${labeledTd('Admin', `<div>${esc(g.name) || '—'}</div>
+              <div class="mono" style="font-size:11px;color:var(--text-dim)">${esc(g.adminEmail)}</div>`)}
+            ${labeledTd('Total Earned', g.total > 0
+              ? `<strong style="color:var(--green-text)">₵${fmt(g.total)}</strong>`
+              : `<span style="color:var(--text-dim)">₵0.00</span>`)}
+            ${labeledTd('Share', `<div style="display:flex;align-items:center;gap:8px">
+                ${miniBar(g.total, maxAdmin)}
+                <span style="font-size:11px;color:var(--text-dim)">
+                  ${commissionSum > 0 ? ((g.total / commissionSum) * 100).toFixed(1) : '0.0'}%
+                </span></div>`)}
+            ${labeledTd('Periods', g.count)}
+            ${labeledTd('Avg / Period', `₵${fmt(g.avg)}`)}
+            ${labeledTd('Best Period', g.best.amount > 0
+              ? `<span class="mono" style="font-size:12px">${esc(g.best.label)}</span>
+                 <span style="color:var(--green-text)"> ₵${fmt(g.best.amount)}</span>`
+              : '—')}
+            ${labeledTd('', `<button class="btn-ghost btn-sm">View →</button>`)}
+          </tr>`).join('')}</tbody>
+      </table></div>` : empty('No admins found.')}
+
+    <div class="section-title">📊 Platform Commission by Period</div>
+    ${commissionTotals.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Total Commission</th><th></th><th>Entries</th><th>Currency</th></tr></thead>
+        <tbody>${[...commissionTotals].reverse().map(r => `<tr>
+          ${labeledTd('Period', `<span class="mono">${esc(r.periodLabel)}</span>`)}
           ${labeledTd('Total Commission', `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
-          ${labeledTd('Entries',          r.count)}
-          ${labeledTd('Currency',         r.currency || 'GHS')}
+          ${labeledTd('', miniBar(r.amount, maxComm))}
+          ${labeledTd('Entries', fmtInt(r.count))}
+          ${labeledTd('Currency', esc(r.currency || 'GHS'))}
         </tr>`).join('')}</tbody>
-      </table></div>` : empty('No commission totals for this range.');
-  } catch (e) {
-    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
-  }
+      </table></div>` : empty('No commission totals in this range.')}
+
+    <div class="section-title">📥 Platform Deposits by Period</div>
+    ${depositTotals.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Total Deposits</th><th></th><th>Count</th><th>Avg Deposit</th></tr></thead>
+        <tbody>${[...depositTotals].reverse().map(r => {
+          const cnt = Number(r.count) || 0;
+          return `<tr>
+            ${labeledTd('Period', `<span class="mono">${esc(r.periodLabel)}</span>`)}
+            ${labeledTd('Total Deposits', `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
+            ${labeledTd('', miniBar(r.amount, maxDeposit, 'var(--blue-text, #5b9dff)'))}
+            ${labeledTd('Count', fmtInt(cnt))}
+            ${labeledTd('Avg Deposit', cnt ? `₵${fmt(Number(r.amount) / cnt)}` : '—')}
+          </tr>`;
+        }).join('')}</tbody>
+      </table></div>` : empty('No deposit totals in this range.')}
+
+    <div style="display:flex;gap:8px;padding-top:14px;flex-wrap:wrap">
+      <button class="btn-ghost btn-sm" onclick="exportCommissionCSV()">⬇ Export commission (all admins)</button>
+      <button class="btn-ghost btn-sm" onclick="exportDepositTotalsCSV()">⬇ Export deposit totals</button>
+    </div>`;
 }
 
-async function loadDepositTotals() {
-  const el = document.getElementById('an-deposit-totals');
-  try {
-    const ep = analyticsPeriod === 'daily'
-      ? `/api/super-admin/deposits/daily?days=${analyticsDays}`
-      : `/api/super-admin/deposits/weekly?weeks=${analyticsWeeks}`;
-    const list = await api(ep);
-    el.innerHTML = list.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Total Deposits</th><th>Count</th><th>Currency</th></tr></thead>
-        <tbody>${list.map(r => `<tr>
-          ${labeledTd('Period',          `<span class="mono">${r.periodLabel}</span>`)}
-          ${labeledTd('Total Deposits',  `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
-          ${labeledTd('Count',           r.count)}
-          ${labeledTd('Currency',        r.currency || 'GHS')}
-        </tr>`).join('')}</tbody>
-      </table></div>` : empty('No deposit totals for this range.');
-  } catch (e) {
-    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+// ── View B: a single admin ───────────────────────────────────────────────────
+function renderAdminAnalytics(g) {
+  if (!g) return `
+    <div class="alert alert-warning">⚠ That admin is not in the current result set.</div>
+    <button class="btn-ghost btn-sm" onclick="selectAnalyticsAdmin('')">← Back to all admins</button>`;
+
+  const platformTotal = groupCommissionByAdmin(analyticsCache).reduce((s, x) => s + x.total, 0);
+  const share = platformTotal > 0 ? (g.total / platformTotal) * 100 : 0;
+  const maxAmt = Math.max(...g.periods.map(p => p.amount), 0);
+
+  // Movement between the two most recent buckets.
+  let trend = '';
+  if (g.periods.length >= 2) {
+    const [cur, prev] = g.periods;
+    if (prev.amount > 0) {
+      const delta = ((cur.amount - prev.amount) / prev.amount) * 100;
+      const up = delta >= 0;
+      trend = `<span style="color:${up ? 'var(--green-text)' : 'var(--red-text)'}">
+                 ${up ? '▲' : '▼'} ${Math.abs(delta).toFixed(1)}%</span> vs previous`;
+    }
   }
+
+  return `
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <button class="btn-ghost btn-sm" onclick="selectAnalyticsAdmin('')">← All admins</button>
+      <div>
+        <strong style="font-size:15px">${esc(g.name || g.adminEmail)}</strong>
+        <div class="mono" style="font-size:11px;color:var(--text-dim)">${esc(g.adminEmail)}</div>
+      </div>
+      <button class="btn-ghost btn-sm" style="margin-left:auto"
+        onclick="viewAdmin('${esc(g.adminId)}')">Open full admin profile</button>
+    </div>
+
+    <div class="stat-grid">
+      ${statCard('💰', 'Total Earned', `₵${fmt(g.total)}`, esc(analyticsRangeLabel()))}
+      ${statCard('📊', 'Share of Platform', `${share.toFixed(1)}%`, `of ₵${fmt(platformTotal)} paid out`)}
+      ${statCard('📅', 'Avg per Period', `₵${fmt(g.avg)}`, `across ${g.count} period${g.count !== 1 ? 's' : ''}`)}
+      ${statCard('🏆', 'Best Period', g.best.amount > 0 ? `₵${fmt(g.best.amount)}` : '—', esc(g.best.label))}
+      ${g.last ? statCard('🕒', 'Most Recent', `₵${fmt(g.last.amount)}`, trend || esc(g.last.label)) : ''}
+    </div>
+
+    <div class="section-title">📈 ${analyticsPeriod === 'daily' ? 'Daily' : 'Weekly'} Breakdown — ${esc(analyticsRangeLabel())}</div>
+    ${g.periods.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Commission</th><th></th><th>% of their total</th><th>Currency</th></tr></thead>
+        <tbody>${g.periods.map(p => `<tr>
+          ${labeledTd('Period', `<span class="mono">${esc(p.label)}</span>`)}
+          ${labeledTd('Commission', `<strong style="color:var(--green-text)">₵${fmt(p.amount)}</strong>`)}
+          ${labeledTd('', miniBar(p.amount, maxAmt))}
+          ${labeledTd('% of their total', g.total > 0 ? `${((p.amount / g.total) * 100).toFixed(1)}%` : '—')}
+          ${labeledTd('Currency', esc(g.currency))}
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div style="display:flex;gap:8px;padding-top:14px">
+        <button class="btn-ghost btn-sm"
+          onclick="exportAdminCommissionCSV('${esc(g.adminId)}')">⬇ Export this admin</button>
+      </div>`
+    : empty(`No commission recorded for this admin in the ${analyticsRangeLabel()}.`)}`;
+}
+
+// ── Analytics exports ────────────────────────────────────────────────────────
+function exportCommissionCSV() {
+  const groups = groupCommissionByAdmin(analyticsCache);
+  const rows = [];
+  for (const g of groups) {
+    for (const p of g.periods) {
+      rows.push([p.label, g.adminEmail, g.name, g.adminId, p.amount.toFixed(2), g.currency]);
+    }
+  }
+  if (!rows.length) { showAlert('No commission data to export.', 'error'); return; }
+  exportCSV(`commission-by-admin-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Period', 'Admin Email', 'Admin Name', 'Admin ID', 'Amount', 'Currency'], rows);
+  showAlert(`Exported ${rows.length} rows.`, 'success');
+}
+
+function exportAdminCommissionCSV(adminId) {
+  const g = groupCommissionByAdmin(analyticsCache).find(x => x.adminId === adminId);
+  if (!g || !g.periods.length) { showAlert('Nothing to export for this admin.', 'error'); return; }
+  const safe = (g.adminEmail || adminId).replace(/[^a-z0-9]/gi, '_');
+  exportCSV(`commission-${safe}-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Period', 'Amount', 'Currency'],
+    g.periods.map(p => [p.label, p.amount.toFixed(2), g.currency]));
+  showAlert(`Exported ${g.periods.length} rows.`, 'success');
+}
+
+function exportDepositTotalsCSV() {
+  const rows = analyticsCache?.depositTotals || [];
+  if (!rows.length) { showAlert('No deposit totals to export.', 'error'); return; }
+  exportCSV(`deposit-totals-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Period', 'Total Deposits', 'Count', 'Currency'],
+    rows.map(r => [r.periodLabel, r.amount, r.count, r.currency || 'GHS']));
+  showAlert(`Exported ${rows.length} rows.`, 'success');
 }
 
 // ============================================================
 // INIT
 // ============================================================
-window.onload = () => {
+document.addEventListener('DOMContentLoaded', () => {
   const token = localStorage.getItem('fb_token');
   if (!token) {
     window.location.href = 'auth.html';
@@ -2457,4 +2849,4 @@ window.onload = () => {
   }
   config.token = token;
   renderDashboard();
-};
+});
