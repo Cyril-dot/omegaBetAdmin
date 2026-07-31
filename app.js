@@ -86,7 +86,8 @@ function statusBadge(s) {
     SETTLED:'badge-green',
     PENDING:'badge-yellow', PENDING_COMMISSION:'badge-yellow', REQUESTED:'badge-yellow',
     FAILED:'badge-red', REJECTED:'badge-red',
-    ADMIN:'badge-blue', SUPER_ADMIN:'badge-purple', USER:'badge-gray'
+    ADMIN:'badge-blue', SUPER_ADMIN:'badge-purple', USER:'badge-gray',
+    ACTIVE:'badge-green', DISABLED:'badge-red', SUSPENDED:'badge-red'
   };
   return `<span class="badge ${map[s]||'badge-gray'}">${s||'—'}</span>`;
 }
@@ -407,16 +408,24 @@ async function renderUsers(page = 0) {
     const list = data.content || [];
     document.getElementById('users-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Country</th><th>Role</th><th>Verified</th><th>Joined</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Country</th><th>Role</th><th>Status</th><th>Verified</th><th>Joined</th><th>Actions</th></tr></thead>
         <tbody>${list.map(u => `<tr>
           ${labeledTd('Name',     `${u.firstName||''} ${u.lastName||''}`.trim()||'—')}
           ${labeledTd('Email',    u.email)}
           ${labeledTd('Phone',    `<span class="mono">${u.phone||'—'}</span>`)}
           ${labeledTd('Country',  u.country||'—')}
           ${labeledTd('Role',     statusBadge(u.role))}
+          ${labeledTd('Status',   statusBadge(u.status || 'ACTIVE'))}
           ${labeledTd('Verified', u.emailVerified ? '✅' : '❌')}
           ${labeledTd('Joined',   `<span class="mono">${fmtDate(u.createdAt)}</span>`)}
-          ${labeledTd('',         `<button class="btn-ghost btn-sm" onclick="viewUser('${u.id}')">View</button>`)}
+          ${labeledTd('Actions',  `<div class="btn-row">
+            <button class="btn-ghost btn-sm" onclick="viewUser('${u.id}')">View</button>
+            ${u.role !== 'SUPER_ADMIN' ? (
+              (u.status || 'ACTIVE') === 'ACTIVE'
+                ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${u.id}','deactivate')">🚫 Deactivate</button>`
+                : `<button class="btn-success btn-sm" onclick="changeUserStatus('${u.id}','activate')">✓ Activate</button>`
+            ) : ''}
+          </div>`)}
         </tr>`).join('')}</tbody>
       </table></div>
       <div style="display:flex;align-items:center;justify-content:space-between;padding-top:10px;flex-wrap:wrap;gap:8px">
@@ -432,6 +441,7 @@ async function viewUser(id) {
   openModal('User Detail', loading());
   try {
     const d = await api(`/api/super-admin/users/${id}`);
+    const status = d.status || 'ACTIVE';
     document.getElementById('modal-content').innerHTML = `
       <div class="section-title">Profile</div>
       <div class="detail-grid">
@@ -441,6 +451,7 @@ async function viewUser(id) {
         ${detailRow('Phone',          d.phone)}
         ${detailRow('Country',        d.country)}
         ${detailRow('Role',           statusBadge(d.role))}
+        ${detailRow('Account Status', statusBadge(status))}
         ${detailRow('Email Verified', d.emailVerified ? '✅ Yes' : '❌ No')}
         ${detailRow('Created',        fmtDate(d.createdAt))}
       </div>
@@ -454,14 +465,54 @@ async function viewUser(id) {
           ${detailRow('Total Withdrawn',    `₵${fmt(d.wallet.totalWithdrawn)}`)}
           ${detailRow('Total Transactions', d.wallet.totalTransactions)}
         </div>` : '<div class="alert alert-info" style="margin-top:12px">ℹ No wallet found for this user.</div>'}
+      ${status === 'DISABLED' ? `
+        <div class="alert alert-warning" style="margin-top:14px">⚠ This account is currently deactivated. The user cannot log in.</div>` : ''}
       <div class="modal-footer">
         <button class="btn-ghost btn-sm" onclick="viewUserDepositsModal('${id}', '${d.email||''}')">📥 Deposits</button>
         <button class="btn-ghost btn-sm" onclick="viewUserTx('${id}')">Transactions</button>
         <button class="btn-ghost btn-sm" onclick="viewUserWithdrawals('${id}', '${d.email||''}')">Withdrawals</button>
+        ${d.role !== 'SUPER_ADMIN' ? (
+          status === 'ACTIVE'
+            ? `<button class="btn-danger btn-sm" onclick="changeUserStatus('${id}','deactivate')">🚫 Deactivate Account</button>`
+            : `<button class="btn-success btn-sm" onclick="changeUserStatus('${id}','activate')">✓ Activate Account</button>`
+        ) : ''}
         <button class="btn-ghost" onclick="closeModal()">Close</button>
       </div>`;
   } catch (e) {
     document.getElementById('modal-content').innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+// ── Activate / Deactivate user account ─────────────────────────────────────────
+// Backed by SuperAdminUserManagementController:
+//   PATCH /api/v1/super-admin/users/{userId}/deactivate
+//   PATCH /api/v1/super-admin/users/{userId}/activate
+//   PATCH /api/v1/super-admin/users/{userId}/toggle-status
+async function changeUserStatus(userId, action) {
+  const verb = action === 'deactivate' ? 'Deactivate' : 'Activate';
+  const warn = action === 'deactivate'
+    ? ' The user will be immediately unable to log in.'
+    : ' The user will regain access to their account.';
+  if (!confirm(`${verb} this user's account?${warn}`)) return;
+  try {
+    const d = await api(`/api/v1/super-admin/users/${userId}/${action}`, 'PATCH');
+    showAlert(d.message || `Account ${action}d successfully.`, 'success');
+    if (currentPage === 'users') renderUsers(usersPage);
+    if (document.getElementById('modal-bg').classList.contains('open')) viewUser(userId);
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
+  }
+}
+
+async function toggleUserAccountStatus(userId) {
+  if (!confirm("Toggle this user's account status (activate/deactivate)?")) return;
+  try {
+    const d = await api(`/api/v1/super-admin/users/${userId}/toggle-status`, 'PATCH');
+    showAlert(d.message || `Status updated to ${d.status}.`, 'success');
+    if (currentPage === 'users') renderUsers(usersPage);
+    if (document.getElementById('modal-bg').classList.contains('open')) viewUser(userId);
+  } catch (e) {
+    showAlert('Error: ' + e.message, 'error');
   }
 }
 
