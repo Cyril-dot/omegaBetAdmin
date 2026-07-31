@@ -162,7 +162,8 @@ function navigate(page) {
     'payout-requests':'Payout Requests', 'audit-log':'Audit Log',
     'withdrawals':'Withdrawal Requests',
     'user-deposits':'User Deposit History',
-    'simple-deposits':'Simple Deposits (MoMo)'
+    'simple-deposits':'Simple Deposits (MoMo)',
+    'commission-analytics':'Commission & Deposit Analytics'
   };
   document.getElementById('page-title').textContent = titles[page] || page;
   document.getElementById('alert-container').innerHTML = '';
@@ -178,7 +179,8 @@ function reloadPage() {
     'payout-requests':renderPayoutRequests, 'audit-log':renderAuditLog,
     'withdrawals':renderWithdrawals,
     'user-deposits':renderUserDeposits,
-    'simple-deposits':renderSimpleDeposits
+    'simple-deposits':renderSimpleDeposits,
+    'commission-analytics':renderCommissionAnalytics
   };
   (pages[currentPage] || renderDashboard)();
 }
@@ -2305,6 +2307,142 @@ async function exportSimpleDepositsCSV() {
     showAlert('Export failed: ' + e.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '⬇ Export CSV'; }
+  }
+}
+
+// ============================================================
+// 14. COMMISSION & DEPOSIT ANALYTICS (Super Admin)
+// ============================================================
+// Backed by SuperAdminCommissionController / SuperAdminDepositService:
+//   GET /api/super-admin/commission/by-admin/daily?days=N
+//   GET /api/super-admin/commission/by-admin/weekly?weeks=N
+//   GET /api/super-admin/commission/totals/daily?days=N
+//   GET /api/super-admin/commission/totals/weekly?weeks=N
+//   GET /api/super-admin/deposits/daily?days=N
+//   GET /api/super-admin/deposits/weekly?weeks=N
+// NOTE: if your controllers are mapped at /api/superadmin/... instead,
+// update either the @RequestMapping there or the paths below to match.
+// ─────────────────────────────────────────────────────────────
+let analyticsPeriod = 'daily'; // 'daily' | 'weekly'
+let analyticsDays = 30, analyticsWeeks = 12;
+
+async function renderCommissionAnalytics() {
+  const c = document.getElementById('page-content');
+  c.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <h2>Commission &amp; Deposit Analytics</h2>
+      </div>
+      <div class="card-body">
+        <div class="tabs">
+          <button class="tab ${analyticsPeriod==='daily'?'active':''}"
+            onclick="analyticsPeriod='daily';renderCommissionAnalytics()">Daily</button>
+          <button class="tab ${analyticsPeriod==='weekly'?'active':''}"
+            onclick="analyticsPeriod='weekly';renderCommissionAnalytics()">Weekly</button>
+        </div>
+        <div class="form-row" style="margin:16px 0">
+          ${analyticsPeriod==='daily' ? `
+            <div class="form-group">
+              <label>Days</label>
+              <input id="an-days" type="number" min="1" max="365" value="${analyticsDays}">
+            </div>` : `
+            <div class="form-group">
+              <label>Weeks</label>
+              <input id="an-weeks" type="number" min="1" max="52" value="${analyticsWeeks}">
+            </div>`}
+          <button class="btn-primary" style="align-self:flex-end" onclick="applyAnalyticsRange()">Apply</button>
+        </div>
+
+        <div class="section-title">💰 Commission by Admin</div>
+        <div id="an-commission-by-admin">${loading()}</div>
+
+        <div class="section-title">📊 Platform Commission Totals</div>
+        <div id="an-commission-totals">${loading()}</div>
+
+        <div class="section-title">📥 Platform Deposit Totals</div>
+        <div id="an-deposit-totals">${loading()}</div>
+      </div>
+    </div>`;
+
+  loadCommissionByAdmin();
+  loadCommissionTotals();
+  loadDepositTotals();
+}
+
+function applyAnalyticsRange() {
+  if (analyticsPeriod === 'daily') {
+    const v = parseInt(document.getElementById('an-days').value, 10);
+    analyticsDays = (v && v > 0) ? v : 30;
+  } else {
+    const v = parseInt(document.getElementById('an-weeks').value, 10);
+    analyticsWeeks = (v && v > 0) ? v : 12;
+  }
+  renderCommissionAnalytics();
+}
+
+async function loadCommissionByAdmin() {
+  const el = document.getElementById('an-commission-by-admin');
+  try {
+    const ep = analyticsPeriod === 'daily'
+      ? `/api/super-admin/commission/by-admin/daily?days=${analyticsDays}`
+      : `/api/super-admin/commission/by-admin/weekly?weeks=${analyticsWeeks}`;
+    const list = await api(ep);
+    el.innerHTML = list.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Admin</th><th>Amount</th><th>Currency</th></tr></thead>
+        <tbody>${list.map(r => `<tr>
+          ${labeledTd('Period',   `<span class="mono">${r.periodLabel}</span>`)}
+          ${labeledTd('Admin',    r.adminEmail || '—')}
+          ${labeledTd('Amount',   `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
+          ${labeledTd('Currency', r.currency || 'GHS')}
+        </tr>`).join('')}</tbody>
+      </table></div>` : empty('No commission data for this range.');
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+async function loadCommissionTotals() {
+  const el = document.getElementById('an-commission-totals');
+  try {
+    const ep = analyticsPeriod === 'daily'
+      ? `/api/super-admin/commission/totals/daily?days=${analyticsDays}`
+      : `/api/super-admin/commission/totals/weekly?weeks=${analyticsWeeks}`;
+    const list = await api(ep);
+    el.innerHTML = list.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Total Commission</th><th>Entries</th><th>Currency</th></tr></thead>
+        <tbody>${list.map(r => `<tr>
+          ${labeledTd('Period',           `<span class="mono">${r.periodLabel}</span>`)}
+          ${labeledTd('Total Commission', `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
+          ${labeledTd('Entries',          r.count)}
+          ${labeledTd('Currency',         r.currency || 'GHS')}
+        </tr>`).join('')}</tbody>
+      </table></div>` : empty('No commission totals for this range.');
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
+  }
+}
+
+async function loadDepositTotals() {
+  const el = document.getElementById('an-deposit-totals');
+  try {
+    const ep = analyticsPeriod === 'daily'
+      ? `/api/super-admin/deposits/daily?days=${analyticsDays}`
+      : `/api/super-admin/deposits/weekly?weeks=${analyticsWeeks}`;
+    const list = await api(ep);
+    el.innerHTML = list.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Period</th><th>Total Deposits</th><th>Count</th><th>Currency</th></tr></thead>
+        <tbody>${list.map(r => `<tr>
+          ${labeledTd('Period',          `<span class="mono">${r.periodLabel}</span>`)}
+          ${labeledTd('Total Deposits',  `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
+          ${labeledTd('Count',           r.count)}
+          ${labeledTd('Currency',        r.currency || 'GHS')}
+        </tr>`).join('')}</tbody>
+      </table></div>` : empty('No deposit totals for this range.');
+  } catch (e) {
+    el.innerHTML = `<div class="alert alert-error">✕ ${e.message}</div>`;
   }
 }
 
