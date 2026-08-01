@@ -167,6 +167,44 @@ function depositSymbol(amount) { return isMomo(amount) ? '₵' : '₦'; }
 function depositLabel(amount) { return isMomo(amount) ? 'MoMo' : 'Bank Transfer'; }
 function depositCurrency(amount) { return isMomo(amount) ? 'GHS' : 'NGN'; }
 
+// ── Country helpers ───────────────────────────────────────────────────────────
+// The API returns a normalised country bucket (GH | NG | OTHER | UNKNOWN) on
+// transaction and deposit rows. Ghanaian users hold cedis, Nigerian users hold
+// naira, so the symbol follows the row rather than being hardcoded.
+// Mirrors CountryUtils.normalize on the server, for the raw User.country text
+// that older endpoints still return unnormalised.
+function normalizeCountry(raw) {
+  if (!raw) return 'UNKNOWN';
+  const c = String(raw).trim().toUpperCase();
+  if (c === 'GH' || c === 'GHA' || c === '233' || c.startsWith('GHANA')) return 'GH';
+  if (c === 'NG' || c === 'NGA' || c === '234' || c.startsWith('NIGERIA')) return 'NG';
+  return 'OTHER';
+}
+
+function countrySymbol(country) {
+  return country === 'NG' ? '₦' : '₵';
+}
+
+function countryCurrency(country) {
+  return country === 'NG' ? 'NGN' : 'GHS';
+}
+
+/** Amount formatted with the symbol for that row's country. */
+function fmtByCountry(amount, country) {
+  return `${countrySymbol(country)}${fmt(amount)}`;
+}
+
+function countryBadge(country) {
+  const map = {
+    GH: { cls: 'badge-green', text: '🇬🇭 Ghana' },
+    NG: { cls: 'badge-blue',  text: '🇳🇬 Nigeria' },
+    OTHER: { cls: 'badge-gray', text: '🌍 Other' },
+    UNKNOWN: { cls: 'badge-gray', text: '❓ Unknown' }
+  };
+  const m = map[country] || map.UNKNOWN;
+  return `<span class="badge ${m.cls}">${m.text}</span>`;
+}
+
 function statusBadge(s) {
   const map = {
     COMPLETED: 'badge-green', APPROVED: 'badge-green', PROCESSED: 'badge-green',
@@ -544,7 +582,10 @@ async function renderUsers(page = 0) {
           ${labeledTd('Name', esc(`${u.firstName || ''} ${u.lastName || ''}`.trim()) || '—')}
           ${labeledTd('Email', esc(u.email))}
           ${labeledTd('Phone', `<span class="mono">${esc(u.phone) || '—'}</span>`)}
-          ${labeledTd('Country', esc(u.country) || '—')}
+          ${labeledTd('Country', u.country
+            ? `${countryBadge(normalizeCountry(u.country))}
+               <span style="font-size:11px;color:var(--text-dim)"> ${esc(u.country)}</span>`
+            : countryBadge('UNKNOWN'))}
           ${labeledTd('Role', statusBadge(u.role))}
           ${labeledTd('Status', statusBadge(u.status || 'ACTIVE'))}
           ${labeledTd('Verified', u.emailVerified ? '✅' : '❌')}
@@ -580,7 +621,10 @@ async function viewUser(id) {
         ${detailRow('Email', esc(d.email))}
         ${detailRow('Name', esc(`${d.firstName || ''} ${d.lastName || ''}`.trim()))}
         ${detailRow('Phone', esc(d.phone))}
-        ${detailRow('Country', esc(d.country))}
+        ${detailRow('Country', d.country
+          ? `${countryBadge(normalizeCountry(d.country))}
+             <span style="font-size:11px;color:var(--text-dim)"> ${esc(d.country)}</span>`
+          : countryBadge('UNKNOWN'))}
         ${detailRow('Role', statusBadge(d.role))}
         ${detailRow('Account Status', statusBadge(status))}
         ${detailRow('Email Verified', d.emailVerified ? '✅ Yes' : '❌ No')}
@@ -728,18 +772,22 @@ async function viewUserDepositsModal(userId, userEmail) {
 
     const totalDeposited = list.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
 
+    // All rows belong to one user, so they share a country and a currency.
+    const country = list[0]?.userCountry || 'UNKNOWN';
+
     setModalContent(`
       <div class="alert alert-info" style="margin-bottom:14px">
         ℹ <strong>${list.length}</strong> deposit${list.length !== 1 ? 's' : ''} shown
-        ${data.totalElements > list.length ? `(${fmtInt(data.totalElements)} total — open the full page for all)` : ''}.
-        Total shown: <strong style="color:var(--green-text)">₵${fmt(totalDeposited)}</strong>
+        ${data.totalElements > list.length ? `(${fmtInt(data.totalElements)} total — open the full page for all)` : ''}
+        · ${countryBadge(country)}.
+        Total shown: <strong style="color:var(--green-text)">${fmtByCountry(totalDeposited, country)}</strong>
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Date</th><th>Amount</th><th>Balance After</th><th>Status</th><th>Provider Ref</th></tr></thead>
         <tbody>${list.map(d => `<tr>
           ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('Amount', `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
-          ${labeledTd('Balance After', `₵${fmt(d.balanceAfter)}`)}
+          ${labeledTd('Amount', `<strong style="color:var(--green-text)">${fmtByCountry(d.amount, d.userCountry || country)}</strong>`)}
+          ${labeledTd('Balance After', fmtByCountry(d.balanceAfter, d.userCountry || country))}
           ${labeledTd('Status', statusBadge(d.status))}
           ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncEsc(d.providerRef, 22)}</span>`)}
         </tr>`).join('')}</tbody>
@@ -843,15 +891,16 @@ async function renderTransactions(page = 0) {
     document.getElementById('tx-list').innerHTML = list.length ? `
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Date</th><th>User Email</th><th>Kind</th><th>Amount</th>
+          <th>Date</th><th>User Email</th><th>Country</th><th>Kind</th><th>Amount</th>
           <th>Balance After</th><th>Status</th><th>Provider Ref</th><th></th>
         </tr></thead>
         <tbody>${list.map(t => `<tr>
           ${labeledTd('Date', `<span class="mono">${fmtDate(t.createdAt)}</span>`)}
           ${labeledTd('User Email', esc(t.userEmail) || '—')}
+          ${labeledTd('Country', countryBadge(t.userCountry))}
           ${labeledTd('Kind', kindBadge(t.kind))}
-          ${labeledTd('Amount', `<strong style="color:${CREDIT_KINDS.has(t.kind) ? 'var(--green-text)' : 'var(--red-text)'}">₵${fmt(t.amount)}</strong>`)}
-          ${labeledTd('Balance After', `₵${fmt(t.balanceAfter)}`)}
+          ${labeledTd('Amount', `<strong style="color:${CREDIT_KINDS.has(t.kind) ? 'var(--green-text)' : 'var(--red-text)'}">${fmtByCountry(t.amount, t.userCountry)}</strong>`)}
+          ${labeledTd('Balance After', fmtByCountry(t.balanceAfter, t.userCountry))}
           ${labeledTd('Status', statusBadge(t.status))}
           ${labeledTd('Provider Ref', `<span class="mono">${truncEsc(t.providerRef, 20)}</span>`)}
           ${labeledTd('', `<button class="btn-ghost btn-sm" onclick="viewTx('${esc(t.id)}')">Detail</button>`)}
@@ -875,8 +924,10 @@ function viewTx(id) {
       ${detailRow('ID', `<span class="mono">${esc(t.id)}</span>`)}
       ${detailRow('Kind', kindBadge(t.kind))}
       ${detailRow('Status', statusBadge(t.status))}
-      ${detailRow('Amount', `₵${fmt(t.amount)}`)}
-      ${detailRow('Balance After', `₵${fmt(t.balanceAfter)}`)}
+      ${detailRow('Amount', `${fmtByCountry(t.amount, t.userCountry)}
+        <span style="font-size:11px;color:var(--text-dim)">${countryCurrency(t.userCountry)}</span>`)}
+      ${detailRow('Balance After', fmtByCountry(t.balanceAfter, t.userCountry))}
+      ${detailRow('Country', countryBadge(t.userCountry))}
       ${detailRow('User Email', esc(t.userEmail))}
       ${detailRow('User ID', `<span class="mono">${esc(t.userId)}</span>`)}
       ${detailRow('Wallet ID', `<span class="mono">${esc(t.walletId)}</span>`)}
@@ -904,10 +955,12 @@ async function exportTransactionsCSV() {
     }
     if (!rows.length) { showAlert('Nothing to export.', 'error'); return; }
     exportCSV(`transactions-${new Date().toISOString().slice(0, 10)}.csv`,
-      ['ID', 'User Email', 'User ID', 'Wallet ID', 'Kind', 'Amount (GHS)',
-        'Balance After', 'Status', 'Provider Ref', 'Date'],
-      rows.map(t => [t.id, t.userEmail, t.userId, t.walletId, t.kind,
-        t.amount, t.balanceAfter, t.status, t.providerRef || '', t.createdAt]));
+      ['ID', 'User Email', 'User ID', 'Country', 'Currency', 'Wallet ID', 'Kind',
+        'Amount', 'Balance After', 'Status', 'Provider Ref', 'Date'],
+      rows.map(t => [t.id, t.userEmail, t.userId,
+        t.userCountry || 'UNKNOWN', countryCurrency(t.userCountry),
+        t.walletId, t.kind, t.amount, t.balanceAfter,
+        t.status, t.providerRef || '', t.createdAt]));
     showAlert(`Exported ${rows.length} rows.`, 'success');
   } catch (e) {
     showAlert('Export failed: ' + e.message, 'error');
@@ -2147,6 +2200,7 @@ async function renderUserDeposits(page = 0) {
     const email = list[0]?.userEmail || udFilterUserEmail || '—';
     const userId = list[0]?.userId || udFilterUserId;
     const pageTotal = list.reduce((s, d) => s + (Number(d.amount) || 0), 0);
+    const country = list[0]?.userCountry || 'UNKNOWN';
 
     document.getElementById('ud-list').innerHTML = `
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
@@ -2154,10 +2208,12 @@ async function renderUserDeposits(page = 0) {
           <span><span style="color:var(--text-dim);font-size:12px">User</span><br>
             <strong>${esc(`${firstName} ${lastName}`.trim())}</strong>
             <span style="color:var(--text-dim);font-size:12px;margin-left:6px">${esc(email)}</span></span>
+          <span><span style="color:var(--text-dim);font-size:12px">Country</span><br>
+            ${countryBadge(country)}</span>
           <span><span style="color:var(--text-dim);font-size:12px">Total Records</span><br>
             <strong>${fmtInt(data.totalElements)}</strong></span>
           <span><span style="color:var(--text-dim);font-size:12px">Page Total</span><br>
-            <strong style="color:var(--green-text)">₵${fmt(pageTotal)}</strong></span>
+            <strong style="color:var(--green-text)">${fmtByCountry(pageTotal, country)}</strong></span>
         </div>
         <button class="btn-ghost btn-sm" onclick="viewUser('${esc(userId)}')">View full profile</button>
       </div>
@@ -2169,8 +2225,8 @@ async function renderUserDeposits(page = 0) {
         <tbody>${list.map((d, i) => `<tr>
           ${labeledTd('#', String(udPage * 25 + i + 1))}
           ${labeledTd('Date', `<span class="mono" style="font-size:12px">${fmtDate(d.createdAt)}</span>`)}
-          ${labeledTd('Amount', `<strong style="color:var(--green-text)">₵${fmt(d.amount)}</strong>`)}
-          ${labeledTd('Balance After', `₵${fmt(d.balanceAfter)}`)}
+          ${labeledTd('Amount', `<strong style="color:var(--green-text)">${fmtByCountry(d.amount, d.userCountry || country)}</strong>`)}
+          ${labeledTd('Balance After', fmtByCountry(d.balanceAfter, d.userCountry || country))}
           ${labeledTd('Status', statusBadge(d.status))}
           ${labeledTd('Provider Ref', `<span class="mono" style="font-size:11px">${truncEsc(d.providerRef, 24)}</span>`)}
           ${labeledTd('Tx ID', `<span class="mono" style="font-size:11px">${truncEsc(d.transactionId, 20)}</span>`)}
@@ -2208,9 +2264,12 @@ async function exportUserDepositsCSV() {
     const safeEmail = (rows[0]?.userEmail || udFilterUserId).replace(/[^a-z0-9]/gi, '_');
     exportCSV(`deposits-${safeEmail}-${new Date().toISOString().slice(0, 10)}.csv`,
       ['Tx ID', 'Wallet ID', 'User ID', 'User Email', 'First Name', 'Last Name',
-        'Amount (GHS)', 'Balance After', 'Provider Ref', 'Status', 'Created At'],
+        'Country', 'Currency', 'Amount', 'Balance After',
+        'Provider Ref', 'Status', 'Created At'],
       rows.map(d => [d.transactionId, d.walletId, d.userId, d.userEmail,
-        d.firstName, d.lastName, d.amount, d.balanceAfter,
+        d.firstName, d.lastName,
+        d.userCountry || 'UNKNOWN', d.currency || countryCurrency(d.userCountry),
+        d.amount, d.balanceAfter,
         d.providerRef || '', d.status, d.createdAt]));
     showAlert(`Exported ${rows.length} rows.`, 'success');
   } catch (e) {
@@ -2445,25 +2504,38 @@ async function exportSimpleDepositsCSV() {
 }
 
 // ============================================================
-// 14. COMMISSION & DEPOSIT ANALYTICS
+// 14. COMMISSION & DEPOSIT ANALYTICS — split by country
 // ============================================================
-// Endpoints (hyphenated /api/super-admin/ prefix):
-//   GET /api/super-admin/commission/by-admin/daily?days=N
-//   GET /api/super-admin/commission/by-admin/weekly?weeks=N
-//   GET /api/super-admin/commission/totals/daily?days=N
-//   GET /api/super-admin/commission/totals/weekly?weeks=N
-//   GET /api/super-admin/deposits/daily?days=N
-//   GET /api/super-admin/deposits/weekly?weeks=N
+//   GET /api/super-admin/commission/country-report/daily?days=N
+//   GET /api/super-admin/commission/country-report/weekly?weeks=N
 //
-// The by-admin endpoint returns one row per (period, admin). We fetch once,
-// cache, and group client-side — so switching between admins is instant and
-// costs zero extra requests.
+// Ghana deposits arrive as MoMo in cedis; Nigeria's are mostly bank transfers
+// in naira. Two currencies, so GH and NG figures are shown side by side and
+// are never added together — a combined "total" across both would be a
+// meaningless number. Two independent toggles: country and admin.
 // ─────────────────────────────────────────────────────────────
-let analyticsPeriod = 'daily';   // 'daily' | 'weekly'
-let analyticsDays = 30;
-let analyticsWeeks = 12;
-let analyticsAdminId = '';       // '' = overview across all admins
-let analyticsCache = null;
+let analyticsPeriod  = 'daily';   // 'daily' | 'weekly'
+let analyticsDays    = 30;
+let analyticsWeeks   = 12;
+let analyticsCountry = '';        // '' = both, or 'GH' | 'NG' | 'OTHER' | 'UNKNOWN'
+let analyticsAdminId = '';        // '' = all admins
+let analyticsReport  = null;      // cached CountrySplitReportDto
+let analyticsAdmins  = [];        // roster, so zero-earning admins still list
+
+const COUNTRY_META = {
+  GH:      { flag: '🇬🇭', symbol: '₵', name: 'Ghana',          note: 'MoMo / wallet funding' },
+  NG:      { flag: '🇳🇬', symbol: '₦', name: 'Nigeria',        note: 'mostly bank transfer' },
+  OTHER:   { flag: '🌍', symbol: '₵', name: 'Other countries', note: '' },
+  UNKNOWN: { flag: '❓', symbol: '₵', name: 'Unknown country', note: 'no country on file' }
+};
+
+function countryMeta(code) { return COUNTRY_META[code] || COUNTRY_META.UNKNOWN; }
+
+/** Format an amount with the symbol matching its own currency. */
+function fmtCur(amount, currency) {
+  const sym = currency === 'NGN' ? '₦' : currency === 'MIXED' ? '' : '₵';
+  return `${sym}${fmt(amount)}`;
+}
 
 function analyticsRangeLabel() {
   return analyticsPeriod === 'daily'
@@ -2471,97 +2543,124 @@ function analyticsRangeLabel() {
     : `last ${analyticsWeeks} week${analyticsWeeks !== 1 ? 's' : ''}`;
 }
 
-function analyticsQuery() {
+function analyticsEndpoint() {
   return analyticsPeriod === 'daily'
-    ? `daily?days=${analyticsDays}`
-    : `weekly?weeks=${analyticsWeeks}`;
+    ? `/api/super-admin/commission/country-report/daily?days=${analyticsDays}`
+    : `/api/super-admin/commission/country-report/weekly?weeks=${analyticsWeeks}`;
 }
 
-/** Entry point used from the admins page — opens analytics focused on one admin. */
+/** Open analytics focused on one admin — used from the admins page. */
 function openAdminAnalytics(adminId) {
   analyticsAdminId = adminId || '';
-  analyticsCache = null;
+  analyticsCountry = '';
+  analyticsReport = null;
   navigate('commission-analytics');
 }
 
+// ── Data ─────────────────────────────────────────────────────────────────────
 async function fetchAnalytics() {
-  const q = analyticsQuery();
-  const [admins, byAdmin, commTotals, depTotals] = await Promise.allSettled([
-    api('/api/super-admin/admins'),
-    api(`/api/super-admin/commission/by-admin/${q}`),
-    api(`/api/super-admin/commission/totals/${q}`),
-    api(`/api/super-admin/deposits/${q}`)
+  const [report, admins] = await Promise.allSettled([
+    api(analyticsEndpoint()),
+    api('/api/super-admin/admins')
   ]);
 
-  const val = r => {
-    if (r.status !== 'fulfilled') return [];
-    const d = r.value;
-    return Array.isArray(d) ? d : (d?.content || []);
-  };
-  const err = r => (r.status === 'rejected' ? (r.reason?.message || 'Request failed') : null);
+  if (report.status !== 'fulfilled') {
+    throw new Error(report.reason?.message || 'Could not load the country report.');
+  }
 
-  analyticsCache = {
-    admins: val(admins),
-    byAdmin: val(byAdmin),
-    commissionTotals: val(commTotals),
-    depositTotals: val(depTotals),
-    errors: {
-      'Admin list': err(admins),
-      'Commission by admin': err(byAdmin),
-      'Commission totals': err(commTotals),
-      'Deposit totals': err(depTotals)
-    }
-  };
-  return analyticsCache;
+  analyticsReport = report.value;
+  analyticsAdmins = admins.status === 'fulfilled'
+    ? (Array.isArray(admins.value) ? admins.value : (admins.value?.content || []))
+    : [];
+
+  return analyticsReport;
+}
+
+/** Country buckets present in this range, GH and NG always first. */
+function activeCountries() {
+  const summaries = analyticsReport?.summaries || [];
+  const order = { GH: 0, NG: 1, OTHER: 2, UNKNOWN: 3 };
+  return [...summaries].sort((a, b) => (order[a.country] ?? 9) - (order[b.country] ?? 9));
+}
+
+/** Rows filtered by the current country toggle. */
+function filterByCountry(rows) {
+  if (!analyticsCountry) return rows || [];
+  return (rows || []).filter(r => r.country === analyticsCountry);
 }
 
 /**
- * Merge the admin roster with commission rows so every admin appears —
- * including those who earned nothing in the selected range.
+ * Group commissionByAdmin rows into per-admin, per-country totals.
+ * Admins with no commission in the range are included at zero so they don't
+ * silently disappear from the list.
  */
-function groupCommissionByAdmin(cache) {
+function groupAdmins() {
+  const rows = filterByCountry(analyticsReport?.commissionByAdmin);
   const map = new Map();
 
-  for (const a of cache.admins) {
+  for (const a of analyticsAdmins) {
     if (!a?.id) continue;
     map.set(a.id, {
       adminId: a.id,
       adminEmail: a.email || '—',
       name: `${a.firstName || ''} ${a.lastName || ''}`.trim(),
-      currency: 'GHS',
-      total: 0,
-      periods: []
+      byCountry: {},
+      periods: [],
+      grandCount: 0
     });
   }
 
-  for (const r of cache.byAdmin) {
-    const id = r.adminId || 'unknown';
-    if (!map.has(id)) {
-      map.set(id, {
-        adminId: id, adminEmail: r.adminEmail || '—', name: '',
-        currency: r.currency || 'GHS', total: 0, periods: []
+  for (const r of rows) {
+    if (!map.has(r.adminId)) {
+      map.set(r.adminId, {
+        adminId: r.adminId, adminEmail: r.adminEmail || '—', name: '',
+        byCountry: {}, periods: [], grandCount: 0
       });
     }
-    const g = map.get(id);
+    const g = map.get(r.adminId);
     const amt = Number(r.amount) || 0;
-    g.total += amt;
-    g.currency = r.currency || g.currency;
-    if (r.adminEmail && g.adminEmail === '—') g.adminEmail = r.adminEmail;
-    g.periods.push({ label: r.periodLabel, amount: amt });
+    const cnt = Number(r.count) || 0;
+
+    const b = g.byCountry[r.country] ||
+      (g.byCountry[r.country] = { amount: 0, count: 0, currency: r.currency });
+    b.amount += amt;
+    b.count += cnt;
+    b.currency = r.currency || b.currency;
+
+    g.grandCount += cnt;
+    g.periods.push({
+      label: r.periodLabel, country: r.country,
+      amount: amt, count: cnt, currency: r.currency
+    });
   }
 
   for (const g of map.values()) {
-    // Newest first — the backend returns ascending period labels.
     g.periods.sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
-    g.count = g.periods.length;
-    g.avg = g.count ? g.total / g.count : 0;
-    g.best = g.periods.reduce((m, p) => (p.amount > m.amount ? p : m), { amount: 0, label: '—' });
-    g.last = g.periods[0] || null;
+    // Rank by the selected country, or by GH then NG when showing both.
+    g.rankValue = analyticsCountry
+      ? (g.byCountry[analyticsCountry]?.amount || 0)
+      : (g.byCountry.GH?.amount || 0) + (g.byCountry.NG?.amount || 0);
   }
 
-  return [...map.values()].sort((a, b) => b.total - a.total);
+  return [...map.values()].sort((a, b) => b.rankValue - a.rankValue);
 }
 
+/** Collapse period rows into one entry per period, keeping countries separate. */
+function pivotByPeriod(rows) {
+  const map = new Map();
+  for (const r of rows || []) {
+    if (!map.has(r.periodLabel)) map.set(r.periodLabel, { label: r.periodLabel, byCountry: {} });
+    const p = map.get(r.periodLabel);
+    const b = p.byCountry[r.country] ||
+      (p.byCountry[r.country] = { amount: 0, count: 0, currency: r.currency });
+    b.amount += Number(r.amount) || 0;
+    b.count += Number(r.count) || 0;
+    b.currency = r.currency || b.currency;
+  }
+  return [...map.values()].sort((a, b) => (a.label < b.label ? 1 : a.label > b.label ? -1 : 0));
+}
+
+// ── Page shell ───────────────────────────────────────────────────────────────
 async function renderCommissionAnalytics() {
   const c = document.getElementById('page-content');
   c.innerHTML = `
@@ -2569,34 +2668,41 @@ async function renderCommissionAnalytics() {
       <div class="card-header">
         <h2>Commission &amp; Deposit Analytics</h2>
         <button class="btn-ghost btn-sm"
-          onclick="analyticsCache=null;renderCommissionAnalytics()">↻ Refresh</button>
+          onclick="analyticsReport=null;renderCommissionAnalytics()">↻ Refresh</button>
       </div>
       <div class="card-body">
         <div class="tabs">
           <button class="tab ${analyticsPeriod === 'daily' ? 'active' : ''}"
-            onclick="analyticsPeriod='daily';analyticsCache=null;renderCommissionAnalytics()">Daily</button>
+            onclick="analyticsPeriod='daily';analyticsReport=null;renderCommissionAnalytics()">Daily</button>
           <button class="tab ${analyticsPeriod === 'weekly' ? 'active' : ''}"
-            onclick="analyticsPeriod='weekly';analyticsCache=null;renderCommissionAnalytics()">Weekly</button>
+            onclick="analyticsPeriod='weekly';analyticsReport=null;renderCommissionAnalytics()">Weekly</button>
         </div>
 
         <div class="form-row" style="margin:16px 0;align-items:flex-end">
           ${analyticsPeriod === 'daily' ? `
-            <div class="form-group" style="max-width:130px">
+            <div class="form-group" style="max-width:120px">
               <label>Days</label>
               <input id="an-days" type="number" min="1" max="365" value="${analyticsDays}"
                 onkeydown="if(event.key==='Enter')applyAnalyticsRange()">
             </div>` : `
-            <div class="form-group" style="max-width:130px">
+            <div class="form-group" style="max-width:120px">
               <label>Weeks</label>
               <input id="an-weeks" type="number" min="1" max="52" value="${analyticsWeeks}"
                 onkeydown="if(event.key==='Enter')applyAnalyticsRange()">
             </div>`}
           <button class="btn-primary" onclick="applyAnalyticsRange()">Apply</button>
 
+          <div class="form-group" style="min-width:180px">
+            <label>Country</label>
+            <select id="an-country-select" onchange="selectAnalyticsCountry(this.value)">
+              <option value="">🌍 Both countries</option>
+            </select>
+          </div>
+
           <div class="form-group" style="flex:1;min-width:220px">
-            <label>Viewing</label>
+            <label>Admin</label>
             <select id="an-admin-select" onchange="selectAnalyticsAdmin(this.value)">
-              <option value="">📊 All admins — overview</option>
+              <option value="">👥 All admins</option>
             </select>
           </div>
         </div>
@@ -2606,7 +2712,7 @@ async function renderCommissionAnalytics() {
     </div>`;
 
   try {
-    if (!analyticsCache) await fetchAnalytics();
+    if (!analyticsReport) await fetchAnalytics();
     renderAnalyticsBody();
   } catch (e) {
     document.getElementById('an-body').innerHTML = errorBox(e.message);
@@ -2621,8 +2727,13 @@ function applyAnalyticsRange() {
     const v = parseInt(document.getElementById('an-weeks')?.value, 10);
     analyticsWeeks = (v && v > 0 && v <= 52) ? v : 12;
   }
-  analyticsCache = null;
+  analyticsReport = null;
   renderCommissionAnalytics();
+}
+
+function selectAnalyticsCountry(code) {
+  analyticsCountry = code || '';
+  renderAnalyticsBody();
 }
 
 function selectAnalyticsAdmin(id) {
@@ -2631,13 +2742,25 @@ function selectAnalyticsAdmin(id) {
 }
 
 function renderAnalyticsBody() {
-  const groups = groupCommissionByAdmin(analyticsCache);
+  const countries = activeCountries();
+  const admins = groupAdmins();
 
-  const sel = document.getElementById('an-admin-select');
-  if (sel) {
-    sel.innerHTML = `<option value="">📊 All admins — overview</option>` +
-      groups.map(g => `<option value="${esc(g.adminId)}" ${analyticsAdminId === g.adminId ? 'selected' : ''}>
-        ${esc(g.adminEmail)} — ₵${fmt(g.total)}
+  const cSel = document.getElementById('an-country-select');
+  if (cSel) {
+    cSel.innerHTML = `<option value="">🌍 Both countries</option>` +
+      countries.map(s => {
+        const m = countryMeta(s.country);
+        return `<option value="${esc(s.country)}" ${analyticsCountry === s.country ? 'selected' : ''}>
+          ${m.flag} ${esc(s.countryName)}
+        </option>`;
+      }).join('');
+  }
+
+  const aSel = document.getElementById('an-admin-select');
+  if (aSel) {
+    aSel.innerHTML = `<option value="">👥 All admins</option>` +
+      admins.map(g => `<option value="${esc(g.adminId)}" ${analyticsAdminId === g.adminId ? 'selected' : ''}>
+        ${esc(g.adminEmail)}
       </option>`).join('');
   }
 
@@ -2645,103 +2768,121 @@ function renderAnalyticsBody() {
   if (!el) return;
 
   el.innerHTML = analyticsAdminId
-    ? renderAdminAnalytics(groups.find(g => g.adminId === analyticsAdminId))
-    : renderAnalyticsOverview(groups);
+    ? renderAdminAnalytics(admins.find(g => g.adminId === analyticsAdminId))
+    : renderAnalyticsOverview(countries, admins);
 }
 
-// ── View A: overview across all admins ───────────────────────────────────────
-function renderAnalyticsOverview(groups) {
-  const { commissionTotals, depositTotals, errors } = analyticsCache;
+// ── View A: overview ─────────────────────────────────────────────────────────
+function renderAnalyticsOverview(countries, admins) {
+  const shown = analyticsCountry
+    ? countries.filter(s => s.country === analyticsCountry)
+    : countries;
 
-  const commissionSum = groups.reduce((s, g) => s + g.total, 0);
-  const depositSum = depositTotals.reduce((s, d) => s + (Number(d.amount) || 0), 0);
-  const depositCount = depositTotals.reduce((s, d) => s + (Number(d.count) || 0), 0);
-  const earning = groups.filter(g => g.total > 0);
-  const top = groups[0];
-  const rate = depositSum > 0 ? (commissionSum / depositSum) * 100 : 0;
-  const maxAdmin = Math.max(...groups.map(g => g.total), 0);
-  const maxDeposit = Math.max(...depositTotals.map(d => Number(d.amount) || 0), 0);
-  const maxComm = Math.max(...commissionTotals.map(r => Number(r.amount) || 0), 0);
+  if (!shown.length) {
+    return empty(`No activity recorded in the ${analyticsRangeLabel()}.`);
+  }
 
-  const errBanner = Object.entries(errors)
-    .filter(([, v]) => v)
-    .map(([k, v]) => errorBox(`${k}: ${v}`)).join('');
+  // One card per country. Deposits and commission stay in their own currency
+  // and are never combined into a platform-wide figure.
+  const cards = shown.map(s => {
+    const m = countryMeta(s.country);
+    return `
+      <div class="stat" style="min-width:260px">
+        <span class="stat-icon">${m.flag}</span>
+        <div class="stat-label">${esc(s.countryName)}${m.note ? ` · ${esc(m.note)}` : ''}</div>
+        <div class="stat-value">${fmtCur(s.depositTotal, s.currency)}</div>
+        <div class="stat-sub">${fmtInt(s.depositCount)} deposits ·
+          avg ${fmtCur(s.averageDeposit, s.currency)}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(127,127,127,.2)">
+          <div class="stat-label">Commission paid</div>
+          <div style="font-size:19px;font-weight:600;color:var(--green-text)">
+            ${fmtCur(s.commissionTotal, s.currency)}</div>
+          <div class="stat-sub">${fmtInt(s.commissionCount)} entries ·
+            ${Number(s.effectiveCommissionRate).toFixed(2)}% of deposits</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const depositPeriods = pivotByPeriod(filterByCountry(analyticsReport.depositsByPeriod));
+  const commissionPeriods = pivotByPeriod(filterByCountry(analyticsReport.commissionByPeriod));
+  const cols = shown.map(s => s.country);
 
   return `
-    ${errBanner}
-    <div class="stat-grid">
-      ${statCard('💰', 'Total Commission Paid', `₵${fmt(commissionSum)}`, esc(analyticsRangeLabel()))}
-      ${statCard('📥', 'Total Deposits', `₵${fmt(depositSum)}`, `${fmtInt(depositCount)} transactions`)}
-      ${statCard('📊', 'Effective Commission Rate', `${rate.toFixed(1)}%`, 'commission ÷ deposits')}
-      ${statCard('👤', 'Earning Admins', `${earning.length} / ${groups.length}`, 'earned in this range')}
-      ${top && top.total > 0
-        ? statCard('🏆', 'Top Earner', `₵${fmt(top.total)}`, esc(top.adminEmail))
-        : ''}
+    <div class="alert alert-info" style="margin-bottom:14px">
+      ℹ Ghana figures are in cedis and Nigeria's in naira. The two are shown
+      separately and never added together.
     </div>
 
-    <div class="section-title">👥 Commission by Admin — select a row to drill in</div>
-    ${groups.length ? `
+    <div class="stat-grid">${cards}</div>
+
+    <div class="section-title">📥 Deposits by period — ${esc(analyticsRangeLabel())}</div>
+    ${periodTable(depositPeriods, cols, 'No deposits in this range.')}
+
+    <div class="section-title">💰 Commission by period</div>
+    ${periodTable(commissionPeriods, cols, 'No commission in this range.')}
+
+    <div class="section-title">👥 Commission by admin — select a row to drill in</div>
+    ${admins.length ? `
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>#</th><th>Admin</th><th>Total Earned</th><th>Share</th>
-          <th>Periods</th><th>Avg / Period</th><th>Best Period</th><th></th>
+          <th>#</th><th>Admin</th>
+          ${cols.map(c => `<th>${countryMeta(c).flag} ${esc(countryMeta(c).name)}</th>`).join('')}
+          <th>Entries</th><th></th>
         </tr></thead>
-        <tbody>${groups.map((g, i) => `
+        <tbody>${admins.map((g, i) => `
           <tr style="cursor:pointer" onclick="selectAnalyticsAdmin('${esc(g.adminId)}')">
             ${labeledTd('#', `<span style="color:var(--text-dim)">${i + 1}</span>`)}
             ${labeledTd('Admin', `<div>${esc(g.name) || '—'}</div>
               <div class="mono" style="font-size:11px;color:var(--text-dim)">${esc(g.adminEmail)}</div>`)}
-            ${labeledTd('Total Earned', g.total > 0
-              ? `<strong style="color:var(--green-text)">₵${fmt(g.total)}</strong>`
-              : `<span style="color:var(--text-dim)">₵0.00</span>`)}
-            ${labeledTd('Share', `<div style="display:flex;align-items:center;gap:8px">
-                ${miniBar(g.total, maxAdmin)}
-                <span style="font-size:11px;color:var(--text-dim)">
-                  ${commissionSum > 0 ? ((g.total / commissionSum) * 100).toFixed(1) : '0.0'}%
-                </span></div>`)}
-            ${labeledTd('Periods', g.count)}
-            ${labeledTd('Avg / Period', `₵${fmt(g.avg)}`)}
-            ${labeledTd('Best Period', g.best.amount > 0
-              ? `<span class="mono" style="font-size:12px">${esc(g.best.label)}</span>
-                 <span style="color:var(--green-text)"> ₵${fmt(g.best.amount)}</span>`
-              : '—')}
+            ${cols.map(c => {
+              const b = g.byCountry[c];
+              return labeledTd(countryMeta(c).name, b && b.amount > 0
+                ? `<strong style="color:var(--green-text)">${fmtCur(b.amount, b.currency)}</strong>`
+                : `<span style="color:var(--text-dim)">—</span>`);
+            }).join('')}
+            ${labeledTd('Entries', fmtInt(g.grandCount))}
             ${labeledTd('', `<button class="btn-ghost btn-sm">View →</button>`)}
           </tr>`).join('')}</tbody>
       </table></div>` : empty('No admins found.')}
 
-    <div class="section-title">📊 Platform Commission by Period</div>
-    ${commissionTotals.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Total Commission</th><th></th><th>Entries</th><th>Currency</th></tr></thead>
-        <tbody>${[...commissionTotals].reverse().map(r => `<tr>
-          ${labeledTd('Period', `<span class="mono">${esc(r.periodLabel)}</span>`)}
-          ${labeledTd('Total Commission', `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
-          ${labeledTd('', miniBar(r.amount, maxComm))}
-          ${labeledTd('Entries', fmtInt(r.count))}
-          ${labeledTd('Currency', esc(r.currency || 'GHS'))}
-        </tr>`).join('')}</tbody>
-      </table></div>` : empty('No commission totals in this range.')}
-
-    <div class="section-title">📥 Platform Deposits by Period</div>
-    ${depositTotals.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Total Deposits</th><th></th><th>Count</th><th>Avg Deposit</th></tr></thead>
-        <tbody>${[...depositTotals].reverse().map(r => {
-          const cnt = Number(r.count) || 0;
-          return `<tr>
-            ${labeledTd('Period', `<span class="mono">${esc(r.periodLabel)}</span>`)}
-            ${labeledTd('Total Deposits', `<strong style="color:var(--green-text)">₵${fmt(r.amount)}</strong>`)}
-            ${labeledTd('', miniBar(r.amount, maxDeposit, 'var(--blue-text, #5b9dff)'))}
-            ${labeledTd('Count', fmtInt(cnt))}
-            ${labeledTd('Avg Deposit', cnt ? `₵${fmt(Number(r.amount) / cnt)}` : '—')}
-          </tr>`;
-        }).join('')}</tbody>
-      </table></div>` : empty('No deposit totals in this range.')}
-
     <div style="display:flex;gap:8px;padding-top:14px;flex-wrap:wrap">
-      <button class="btn-ghost btn-sm" onclick="exportCommissionCSV()">⬇ Export commission (all admins)</button>
-      <button class="btn-ghost btn-sm" onclick="exportDepositTotalsCSV()">⬇ Export deposit totals</button>
+      <button class="btn-ghost btn-sm" onclick="exportCountryCommissionCSV()">⬇ Export commission by country</button>
+      <button class="btn-ghost btn-sm" onclick="exportCountryDepositsCSV()">⬇ Export deposits by country</button>
     </div>`;
+}
+
+/** Shared period table: one row per period, one column per country. */
+function periodTable(periods, cols, emptyMsg) {
+  if (!periods.length) return empty(emptyMsg);
+
+  // Bars are scaled per country so the shape of each series is readable on its
+  // own terms; scaling across currencies would imply they are comparable.
+  const maxByCountry = {};
+  for (const c of cols) {
+    maxByCountry[c] = Math.max(...periods.map(p => p.byCountry[c]?.amount || 0), 0);
+  }
+
+  return `
+    <div class="tbl-wrap"><table>
+      <thead><tr>
+        <th>Period</th>
+        ${cols.map(c => `<th>${countryMeta(c).flag} ${esc(countryMeta(c).name)}</th>`).join('')}
+      </tr></thead>
+      <tbody>${periods.map(p => `<tr>
+        ${labeledTd('Period', `<span class="mono">${esc(p.label)}</span>`)}
+        ${cols.map(c => {
+          const b = p.byCountry[c];
+          if (!b || b.amount === 0) {
+            return labeledTd(countryMeta(c).name, `<span style="color:var(--text-dim)">—</span>`);
+          }
+          return labeledTd(countryMeta(c).name, `
+            <div><strong>${fmtCur(b.amount, b.currency)}</strong>
+              <span style="font-size:11px;color:var(--text-dim)"> · ${fmtInt(b.count)}</span></div>
+            ${miniBar(b.amount, maxByCountry[c],
+              c === 'NG' ? 'var(--blue-text, #5b9dff)' : 'var(--green-text)')}`);
+        }).join('')}
+      </tr>`).join('')}</tbody>
+    </table></div>`;
 }
 
 // ── View B: a single admin ───────────────────────────────────────────────────
@@ -2750,21 +2891,37 @@ function renderAdminAnalytics(g) {
     <div class="alert alert-warning">⚠ That admin is not in the current result set.</div>
     <button class="btn-ghost btn-sm" onclick="selectAnalyticsAdmin('')">← Back to all admins</button>`;
 
-  const platformTotal = groupCommissionByAdmin(analyticsCache).reduce((s, x) => s + x.total, 0);
-  const share = platformTotal > 0 ? (g.total / platformTotal) * 100 : 0;
-  const maxAmt = Math.max(...g.periods.map(p => p.amount), 0);
+  const countries = activeCountries();
+  const cols = (analyticsCountry ? countries.filter(s => s.country === analyticsCountry) : countries)
+    .map(s => s.country);
 
-  // Movement between the two most recent buckets.
-  let trend = '';
-  if (g.periods.length >= 2) {
-    const [cur, prev] = g.periods;
-    if (prev.amount > 0) {
-      const delta = ((cur.amount - prev.amount) / prev.amount) * 100;
-      const up = delta >= 0;
-      trend = `<span style="color:${up ? 'var(--green-text)' : 'var(--red-text)'}">
-                 ${up ? '▲' : '▼'} ${Math.abs(delta).toFixed(1)}%</span> vs previous`;
-    }
-  }
+  // Platform commission per country, so this admin's share is expressed within
+  // each currency rather than against a mixed denominator.
+  const platformByCountry = {};
+  for (const s of countries) platformByCountry[s.country] = Number(s.commissionTotal) || 0;
+
+  const cards = cols.map(c => {
+    const b = g.byCountry[c];
+    const m = countryMeta(c);
+    const total = b?.amount || 0;
+    const platform = platformByCountry[c] || 0;
+    const share = platform > 0 ? (total / platform) * 100 : 0;
+    return `
+      <div class="stat" style="min-width:230px">
+        <span class="stat-icon">${m.flag}</span>
+        <div class="stat-label">${esc(m.name)}</div>
+        <div class="stat-value" style="color:var(--green-text)">
+          ${fmtCur(total, b?.currency || (c === 'NG' ? 'NGN' : 'GHS'))}</div>
+        <div class="stat-sub">${share.toFixed(1)}% of ${esc(m.name)} commission ·
+          ${fmtInt(b?.count || 0)} entries</div>
+      </div>`;
+  }).join('');
+
+  const periods = analyticsCountry
+    ? g.periods.filter(p => p.country === analyticsCountry)
+    : g.periods;
+
+  const pivoted = pivotByPeriod(periods);
 
   return `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
@@ -2777,64 +2934,50 @@ function renderAdminAnalytics(g) {
         onclick="viewAdmin('${esc(g.adminId)}')">Open full admin profile</button>
     </div>
 
-    <div class="stat-grid">
-      ${statCard('💰', 'Total Earned', `₵${fmt(g.total)}`, esc(analyticsRangeLabel()))}
-      ${statCard('📊', 'Share of Platform', `${share.toFixed(1)}%`, `of ₵${fmt(platformTotal)} paid out`)}
-      ${statCard('📅', 'Avg per Period', `₵${fmt(g.avg)}`, `across ${g.count} period${g.count !== 1 ? 's' : ''}`)}
-      ${statCard('🏆', 'Best Period', g.best.amount > 0 ? `₵${fmt(g.best.amount)}` : '—', esc(g.best.label))}
-      ${g.last ? statCard('🕒', 'Most Recent', `₵${fmt(g.last.amount)}`, trend || esc(g.last.label)) : ''}
-    </div>
+    <div class="stat-grid">${cards}</div>
 
-    <div class="section-title">📈 ${analyticsPeriod === 'daily' ? 'Daily' : 'Weekly'} Breakdown — ${esc(analyticsRangeLabel())}</div>
-    ${g.periods.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Period</th><th>Commission</th><th></th><th>% of their total</th><th>Currency</th></tr></thead>
-        <tbody>${g.periods.map(p => `<tr>
-          ${labeledTd('Period', `<span class="mono">${esc(p.label)}</span>`)}
-          ${labeledTd('Commission', `<strong style="color:var(--green-text)">₵${fmt(p.amount)}</strong>`)}
-          ${labeledTd('', miniBar(p.amount, maxAmt))}
-          ${labeledTd('% of their total', g.total > 0 ? `${((p.amount / g.total) * 100).toFixed(1)}%` : '—')}
-          ${labeledTd('Currency', esc(g.currency))}
-        </tr>`).join('')}</tbody>
-      </table></div>
+    <div class="section-title">📈 ${analyticsPeriod === 'daily' ? 'Daily' : 'Weekly'} breakdown — ${esc(analyticsRangeLabel())}</div>
+    ${pivoted.length
+      ? periodTable(pivoted, cols, '')
+      : empty(`No commission for this admin in the ${analyticsRangeLabel()}.`)}
+
+    ${pivoted.length ? `
       <div style="display:flex;gap:8px;padding-top:14px">
         <button class="btn-ghost btn-sm"
           onclick="exportAdminCommissionCSV('${esc(g.adminId)}')">⬇ Export this admin</button>
-      </div>`
-    : empty(`No commission recorded for this admin in the ${analyticsRangeLabel()}.`)}`;
+      </div>` : ''}`;
 }
 
 // ── Analytics exports ────────────────────────────────────────────────────────
-function exportCommissionCSV() {
-  const groups = groupCommissionByAdmin(analyticsCache);
-  const rows = [];
-  for (const g of groups) {
-    for (const p of g.periods) {
-      rows.push([p.label, g.adminEmail, g.name, g.adminId, p.amount.toFixed(2), g.currency]);
-    }
-  }
+function exportCountryCommissionCSV() {
+  const rows = filterByCountry(analyticsReport?.commissionByAdmin);
   if (!rows.length) { showAlert('No commission data to export.', 'error'); return; }
-  exportCSV(`commission-by-admin-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['Period', 'Admin Email', 'Admin Name', 'Admin ID', 'Amount', 'Currency'], rows);
+  exportCSV(`commission-by-country-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Period', 'Country', 'Admin Email', 'Admin ID', 'Amount', 'Currency', 'Entries'],
+    rows.map(r => [r.periodLabel, r.countryName, r.adminEmail, r.adminId,
+      r.amount, r.currency, r.count]));
+  showAlert(`Exported ${rows.length} rows.`, 'success');
+}
+
+function exportCountryDepositsCSV() {
+  const rows = filterByCountry(analyticsReport?.depositsByPeriod);
+  if (!rows.length) { showAlert('No deposit data to export.', 'error'); return; }
+  exportCSV(`deposits-by-country-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Period', 'Country', 'Total', 'Currency', 'Count'],
+    rows.map(r => [r.periodLabel, r.countryName, r.amount, r.currency, r.count]));
   showAlert(`Exported ${rows.length} rows.`, 'success');
 }
 
 function exportAdminCommissionCSV(adminId) {
-  const g = groupCommissionByAdmin(analyticsCache).find(x => x.adminId === adminId);
+  const g = groupAdmins().find(x => x.adminId === adminId);
   if (!g || !g.periods.length) { showAlert('Nothing to export for this admin.', 'error'); return; }
+  const rows = analyticsCountry
+    ? g.periods.filter(p => p.country === analyticsCountry)
+    : g.periods;
   const safe = (g.adminEmail || adminId).replace(/[^a-z0-9]/gi, '_');
   exportCSV(`commission-${safe}-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['Period', 'Amount', 'Currency'],
-    g.periods.map(p => [p.label, p.amount.toFixed(2), g.currency]));
-  showAlert(`Exported ${g.periods.length} rows.`, 'success');
-}
-
-function exportDepositTotalsCSV() {
-  const rows = analyticsCache?.depositTotals || [];
-  if (!rows.length) { showAlert('No deposit totals to export.', 'error'); return; }
-  exportCSV(`deposit-totals-${analyticsPeriod}-${new Date().toISOString().slice(0, 10)}.csv`,
-    ['Period', 'Total Deposits', 'Count', 'Currency'],
-    rows.map(r => [r.periodLabel, r.amount, r.count, r.currency || 'GHS']));
+    ['Period', 'Country', 'Amount', 'Currency', 'Entries'],
+    rows.map(p => [p.label, countryMeta(p.country).name, p.amount, p.currency, p.count]));
   showAlert(`Exported ${rows.length} rows.`, 'success');
 }
 
